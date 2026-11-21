@@ -8,7 +8,12 @@ network thread hitch warning: timer interval of 230 milliseconds
 sync thread hitch warning: timer interval of 188 milliseconds
 ```
 
-FXServer never says who did it. hitchhunter puts a small wrapper inside every resource (one line in each
+FXServer never says who did it.
+
+![hitchhunter naming the culprit of each freeze on a test server](docs/hitchhunter-demo.gif)
+
+(Real console output, recorded live on a test server: each `hhx` command freezes the server on purpose, FXServer warns
+in red, hitchhunter names the culprit in green. [MP4](docs/hitchhunter-demo.mp4), [how it was made](docs/demo/README.md).) hitchhunter puts a small wrapper inside every resource (one line in each
 `fxmanifest.lua`, written by `tools/inject.py`), times what each resource's code does on the server thread and counts
 what it sends. When a hitch happens it tells you what was running at that moment:
 
