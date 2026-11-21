@@ -9,6 +9,8 @@ FXServer prints `server|network|sync thread hitch warning: timer interval of N m
 hitchhunter puts a wrapper inside every resource (one manifest line), times what each resource's code does on the
 server thread, counts what it sends and creates, and when a hitch happens writes a report saying which resource and
 which handler / thread / export / timer did it, or what else did (the engine, the machine).
+Escrowed (encrypted) resources are intercepted too: their manifest is not encrypted, so they get the line and are
+timed like the rest; only their source file name is hidden (`escrow:<line>` in labels).
 
 ## Rules: never break these
 

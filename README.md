@@ -13,9 +13,11 @@ FXServer never says who did it.
 ![hitchhunter naming the culprit of each freeze on a test server](docs/hitchhunter-demo.gif)
 
 (Real console output, recorded live on a test server: each `hhx` command freezes the server on purpose, FXServer warns
-in red, hitchhunter names the culprit in green. [MP4](docs/hitchhunter-demo.mp4), [how it was made](docs/demo/README.md).) hitchhunter puts a small wrapper inside every resource (one line in each
-`fxmanifest.lua`, written by `tools/inject.py`), times what each resource's code does on the server thread and counts
-what it sends. When a hitch happens it tells you what was running at that moment:
+in red, hitchhunter names the culprit in green. [MP4](docs/hitchhunter-demo.mp4), [how it was made](docs/demo/README.md).)
+
+hitchhunter puts a small wrapper inside every resource (one line in each `fxmanifest.lua`, written by
+`tools/inject.py`), times what each resource's code does on the server thread and counts what it sends. When a hitch
+happens it tells you what was running at that moment:
 
 ```
 [hitchhunter] #2 server 372 ms | 0 players | hh_lua_a event hh_lua_a:busy server.lua:13 200 ms; hh_lua_a export heavy 150 ms; hh_lua_b event hh_lua_b:go server.lua:5 20 ms
@@ -27,9 +29,18 @@ event, which took 150 and 200 ms.)
 spent outside any wrapped script, the player and entity counts, the machine's load, and for network / sync hitches
 what was sent or created in the seconds before.
 
+> **Escrowed (encrypted) resources are intercepted too.** Escrow encrypts a resource's scripts, not its
+> `fxmanifest.lua`, so the wrapper line goes in exactly like everywhere else and loads first in the same runtime.
+> Their event handlers, exports, commands, callbacks, threads and timeouts are timed and named like any other code,
+> and their sends, entities, state bags and file reads are counted. The only thing hidden is the source file name:
+> escrowed code shows as `escrow:<line>` (for example `vendor_res thread escrow:4568`).
+> Checked on a 183-resource server: every escrowed resource with server scripts was wrapped.
+> [Details](#escrowed-encrypted-resources).
+
 ## How it works
 
-* **Wrapper, server side, in every resource** (`inject/server.lua`, `inject/server.js`). Measures the CPU time of every
+* **Wrapper, server side, in every resource, escrowed (encrypted) ones included** (`inject/server.lua`,
+  `inject/server.js`). Measures the CPU time of every
   event handler, callback / export call, command, state bag handler, thread and timeout, cut at each `Wait` / `Await`
   (waiting never counts). Time spent in a nested handler of the same resource is not counted twice. It also counts
   `TriggerClientEvent` / `TriggerLatentClientEvent` bytes (x players for `-1`), `TriggerEvent`, state bag writes,
@@ -108,6 +119,8 @@ A vendor update replaces the manifest: run `inject.py --apply` again after updat
 * Resource starts, wrapped or not (loading a resource's scripts runs outside any handler): `hh starts`, and a
   `resource start` line in reports.
 * Blocking calls inside the code: `LoadResourceFile`, `SaveResourceFile`, `io.open`, `json.encode` / `decode`.
+* **Escrowed (encrypted) resources: all of the above**, by resource and event / export / command name; the source
+  file name is replaced by `escrow:<line>`.
 
 **Seen, not named** (shown as "outside wrapped scripts", with the context):
 * Engine work on the server thread: OneSync bookkeeping, resource stops, FiveM's own resources (`chat`, `yarn`,
@@ -275,7 +288,8 @@ timer or a tick / `await` continuation.
    python3 inject.py                 # dry run: lists what it would change
    python3 inject.py --apply
    ```
-   Only manifests of resources with server Lua / JS are touched. Use `--running http://127.0.0.1:30120/info.json` to
+   Only manifests of resources with server Lua / JS are touched, escrowed (encrypted) resources included: their
+   manifest is plain text. Use `--running http://127.0.0.1:30120/info.json` to
    limit it to what your server runs, `--only a,b` / `--exclude a,b` to pick, `--skip-folder "[shared]/[x]"` to
    never touch a folder (one another server also loads, for example). On Windows run it with `python` or `py`.
 4. Restart the server. Each resource picks the line up when it starts; `hh coverage` lists the ones that run without it.
