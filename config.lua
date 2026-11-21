@@ -35,3 +35,9 @@ Config.keepReports = 200
 -- Who may use the `hh` command in game (the server console always can): an ace, e.g.
 -- `add_ace group.admin command.hh allow` in server.cfg. true = restricted to that ace.
 Config.restrictedCommand = true
+
+-- logs/status.json, rewritten every minute: which resources are wrapped and how, hitch counts, the last report.
+Config.statusFile = true
+
+-- Copy every SCRIPT ERROR of the console (with its stack lines) to logs/script-errors-YYYY-MM-DD.log.
+Config.scriptErrorLog = true

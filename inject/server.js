@@ -3,13 +3,14 @@
 // first in resources that have server JS. Same idea as inject/server.lua: time what the resource's code does,
 // count what it sends, report to the hitchhunter resource, change nothing else.
 //
-// Covered: event handlers (on / onNet / addEventListener / AddEventHandler) and exports, timed while they run;
+// Covered: event handlers (on / onNet / addEventListener / AddEventHandler) and exports, timed one by one; each
+// frame's tick in two phases (setTimeout / setInterval callbacks; setTick callbacks + code after an `await`);
 // emitNet / TriggerClientEvent / TriggerLatentClientEvent and emit (counts).
 // No FXServer file is modified (citizen/scripting/v8/main.js and timer.js stay stock): only this resource's own JS
 // globals are replaced, in memory, before its own scripts load.
-// NOT covered: setTick / setTimeout / setInterval / setImmediate (FiveM defines them read-only, they cannot be
-// wrapped) and the code that runs after an `await` (promise continuations). A JS resource busy there shows up
-// in hitch reports as time outside wrapped scripts.
+// setTick / setTimeout / setInterval / setImmediate are read-only (timer.js), so their callbacks cannot be named
+// one by one: they are timed as phases of the resource's tick instead ("js timers", "js setTick + code after
+// await"), see runWithBoundaryStart below. TypeScript resources run as the JS they are compiled to: same coverage.
 (function () {
     'use strict';
     const g = globalThis;
@@ -92,22 +93,30 @@
     }
 
     const stack = [];
-    function run(key, fn, self, args) {
+    function enter(key) {
         const s = stat(key);
         s[0]++;
         const t = now();
         const rec = { key, s, t0: t, b0: t };
         if (stack.length) pause(stack[stack.length - 1], t);
         stack.push(rec);
+        return rec;
+    }
+    function exit(rec) {
+        const t2 = now();
+        const i = stack.lastIndexOf(rec);
+        if (i < 0) return;
+        stack.length = i;
+        pause(rec, t2);
+        blockEnd(rec, t2);
+        if (stack.length) stack[stack.length - 1].t0 = t2;
+    }
+    function run(key, fn, self, args) {
+        const rec = enter(key);
         try {
             return fn.apply(self, args);
         } finally {
-            const t2 = now();
-            const i = stack.lastIndexOf(rec);
-            if (i >= 0) stack.length = i;
-            pause(rec, t2);
-            blockEnd(rec, t2);
-            if (stack.length) stack[stack.length - 1].t0 = t2;
+            exit(rec);
         }
     }
 
@@ -186,6 +195,48 @@
             },
         });
         hooks.push('exports (registering: timed; calling another resource: own time paused)');
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // the runtime's own entry point. FiveM runs EVERYTHING of a JS resource through global.runWithBoundaryStart,
+    // a plain global looked up at each call: each frame's tick (timer.js: setTimeout / setInterval callbacks, then
+    // setTick callbacks, then process._tickCallback = nextTick + promise continuations after an `await`), each
+    // event and each ref call (main.js). setTick / setTimeout / setInterval themselves are read-only, so the tick
+    // is cut in phases instead: this file registers the runtime's FIRST timer and FIRST ticker (setInterval 0 and
+    // setTick, both run before any other of their kind) and switches phase when each one runs:
+    //   KEY_CALL   event or ref call: payload unpack and dispatch (the handlers themselves are timed by name above)
+    //   KEY_TIMERS from the first timer to the first ticker: every setTimeout / setInterval / setImmediate callback
+    //   KEY_TICKS  from the first ticker to the end: setTick callbacks, animation frames, then nextTick callbacks and
+    //              promise continuations (the code after an `await` in any async function of this resource)
+    const KEY_CALL = 'js event / ref call dispatch';
+    const KEY_TIMERS = 'js timers (setTimeout / setInterval)';
+    const KEY_TICKS = 'js setTick + code after await';
+    let current = null; // { rec } of the runtime call in progress
+
+    function phase(key) {
+        const c = current;
+        if (!c || stack[stack.length - 1] !== c.rec) return;
+        if (c.rec.key === KEY_CALL) c.rec.s[0]--; // it was a tick, not an event / ref call
+        exit(c.rec);
+        c.rec = enter(key);
+    }
+
+    const rawRWBS = g.runWithBoundaryStart;
+    if (typeof rawRWBS === 'function') {
+        g.runWithBoundaryStart = function (fn, ...rest) {
+            const c = { rec: enter(KEY_CALL) };
+            const saved = current;
+            current = c;
+            try {
+                return rawRWBS.call(this, fn, ...rest);
+            } finally {
+                current = saved;
+                exit(c.rec);
+            }
+        };
+        setInterval(() => phase(KEY_TIMERS), 0);
+        setTick(() => phase(KEY_TICKS));
+        hooks.push('runWithBoundaryStart (each tick in phases: timers / setTick + await; each event and ref call)');
     }
 
     // ---------------------------------------------------------------------------------------------------------

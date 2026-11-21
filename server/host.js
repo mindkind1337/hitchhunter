@@ -1,6 +1,7 @@
 // hitchhunter: machine load seen from inside FXServer. A hitch where every thread stalls at once usually comes from
 // the machine, not from a script: all cores busy, load above the core count, the FXServer process itself starved.
-// No file reads (FiveM's Node permission model refuses /proc): os.cpus() / os.loadavg() / process.cpuUsage() only.
+// No file reads (FiveM's Node permission model refuses /proc): os.cpus() / os.loadavg() / process.cpuUsage() only,
+// so it works the same on Linux and Windows (except the load average, which Windows does not have).
 // Sampled every 2 s; `host()` returns the last sample.
 const os = require('os');
 
@@ -26,7 +27,9 @@ function sample() {
         const cpus = cpuTotals();
         const proc = process.cpuUsage(); // microseconds, all threads of this process
         const at = Date.now();
-        const out = { load1: os.loadavg()[0], cores: os.cpus().length, memFreeMb: Math.round(os.freemem() / 1048576), at };
+        // os.loadavg() is always [0, 0, 0] on Windows: no load there (the CPU % below works on both)
+        const load1 = process.platform === 'win32' ? null : os.loadavg()[0];
+        const out = { load1, cores: os.cpus().length, memFreeMb: Math.round(os.freemem() / 1048576), at, platform: process.platform };
         if (prevCpus && cpus.total > prevCpus.total) {
             out.machine = (100 * (cpus.busy - prevCpus.busy)) / (cpus.total - prevCpus.total);
         }

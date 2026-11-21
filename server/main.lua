@@ -117,6 +117,13 @@ AddEventHandler(HH .. ':report', function(reqId, res, kind, snap)
     if not p or type(res) ~= 'string' or type(snap) ~= 'table' then return end
     local key = kind == 'js' and (res .. ' (js)') or res
     p[key] = snap
+    -- the report is delivered while the sender waits: re-measure the JS clock offset. On Linux os.nanotime follows the
+    -- wall clock (std::chrono::high_resolution_clock, LuaOS.cpp) and process.hrtime does not, so a clock adjustment
+    -- (NTP) would move JS spans; on Windows both are QueryPerformanceCounter based
+    if kind == 'js' and type(snap.at) == 'number' then
+        local r = runtimes[res]
+        if r and r.js then r.js.offset = now() - snap.at end
+    end
 end)
 
 local function collectAll(limit, doReset)
@@ -127,6 +134,85 @@ local function collectAll(limit, doReset)
     local got = pending[id]
     pending[id] = nil
     return got
+end
+
+-- ------------------------------------------------------------------------------------------------------------------
+-- every entity the server hears about, whoever made it (a script, or a player's game: ambient peds and cars,
+-- spawned props, vehicles). The sync thread's work grows with them: a flood of creations is the usual cause of a sync
+-- hitch, and most never go through a server script. Kept per second for the last 2 minutes.
+local ENT_SECS = 120
+local entSec = {}
+local ENTITY_TYPES = { [1] = 'ped', [2] = 'vehicle', [3] = 'object' }
+
+local function entBucket()
+    local sec = os.time()
+    local i = sec % ENT_SECS
+    local b = entSec[i]
+    if not b or b.sec ~= sec then
+        b = { sec = sec, created = 0, removed = 0, kinds = {}, owners = {} }
+        entSec[i] = b
+    end
+    return b
+end
+
+AddEventHandler('entityCreated', function(ent)
+    local b = entBucket()
+    b.created = b.created + 1
+    local ok, kind, owner = pcall(function()
+        local ty = ENTITY_TYPES[GetEntityType(ent)] or 'other'
+        local pop = GetEntityPopulationType(ent)
+        -- population type 7 = made on purpose (a script, a player spawning it); the others = GTA's ambient population
+        local k = ty .. (pop == 7 and ' (script / spawned)' or ' (ambient)')
+        local o = NetworkGetFirstEntityOwner and NetworkGetFirstEntityOwner(ent) or NetworkGetEntityOwner(ent)
+        return k, o
+    end)
+    if ok then
+        b.kinds[kind] = (b.kinds[kind] or 0) + 1
+        local key = (owner and owner > 0) and tostring(owner) or 'server'
+        b.owners[key] = (b.owners[key] or 0) + 1
+    end
+end)
+
+-- entityCreated only fires for entities a player's game made (ServerGameState.cpp, after entityCreating); the ones a
+-- server script makes (CreateVehicle, CreateObject...) fire serverEntityCreated instead
+AddEventHandler('serverEntityCreated', function(ent)
+    local b = entBucket()
+    b.created = b.created + 1
+    local ok, kind = pcall(function() return (ENTITY_TYPES[GetEntityType(ent)] or 'other') .. ' (server script)' end)
+    kind = ok and kind or 'other (server script)'
+    b.kinds[kind] = (b.kinds[kind] or 0) + 1
+    b.owners.server = (b.owners.server or 0) + 1
+end)
+
+AddEventHandler('entityRemoved', function()
+    local b = entBucket()
+    b.removed = b.removed + 1
+end)
+
+-- the last `seconds` seconds: totals, by kind, by player who created them (name + server id)
+local function recentEntities(seconds)
+    local now_ = os.time()
+    local out = { seconds = seconds, created = 0, removed = 0, kinds = {}, owners = {} }
+    local kinds, owners = {}, {}
+    for s = now_ - seconds + 1, now_ do
+        local b = entSec[s % ENT_SECS]
+        if b and b.sec == s then
+            out.created = out.created + b.created
+            out.removed = out.removed + b.removed
+            for k, n in pairs(b.kinds) do kinds[k] = (kinds[k] or 0) + n end
+            for k, n in pairs(b.owners) do owners[k] = (owners[k] or 0) + n end
+        end
+    end
+    for k, n in pairs(kinds) do out.kinds[#out.kinds + 1] = { key = k, value = n } end
+    for k, n in pairs(owners) do
+        local label = k
+        if k ~= 'server' then label = (GetPlayerName(k) or '?') .. ' [' .. k .. ']' end
+        out.owners[#out.owners + 1] = { key = label, value = n }
+    end
+    table.sort(out.kinds, function(a, b) return a.value > b.value end)
+    table.sort(out.owners, function(a, b) return a.value > b.value end)
+    for i = #out.owners, 6, -1 do out.owners[i] = nil end
+    return out
 end
 
 -- ------------------------------------------------------------------------------------------------------------------
@@ -233,10 +319,11 @@ local function verdict(r)
     local top = r.spans[1]
     local others = (r.kinds.network and 1 or 0) + (r.kinds.sync and 1 or 0)
     local h = r.host
-    local machineBusy = h and ((h.machine or 0) >= 90 or (h.load1 or 0) > (h.cores or 1) * 1.5)
+    local machineBusy = h and ((h.machine or 0) >= 90 or (h.load1 and h.load1 > (h.cores or 1) * 1.5))
     if server and r.attributedMs < server * 0.3 and machineBusy then
-        return fmt('no wrapped script explains it and the machine is overloaded (load %.1f on %d cores, CPU %.0f %%): '
-            .. 'the server was starved by something else on the machine', h.load1 or 0, h.cores or 0, h.machine or 0)
+        return fmt('no wrapped script explains it and the machine is overloaded (%s%d cores, CPU %.0f %%): '
+            .. 'the server was starved by something else on the machine', h.load1 and fmt('load %.1f on ', h.load1) or '',
+            h.cores or 0, h.machine or 0)
     end
     if server and others >= 1 and r.attributedMs < server * 0.3 then
         return 'several server threads stalled together while no wrapped script was running: the whole process was '
@@ -251,6 +338,12 @@ local function verdict(r)
     if server then
         return fmt('only %d ms of the %d ms freeze were in wrapped Lua / JS code: the rest was the engine, C#, '
             .. 'JS async callbacks or a resource without the wrapper', r.attributedMs, server)
+    end
+    local f = r.entityFlow
+    if r.kinds.sync and f and f.created >= 100 then
+        local who = f.owners[1]
+        return fmt('the main thread kept running; %d entities were created in the last %d s%s: the sync thread had to '
+            .. 'take them all in', f.created, f.seconds, who and fmt(' (most by %s: %d)', who.key, who.value) or '')
     end
     return 'the main thread kept running: see what was sent / created just before (recent)'
 end
@@ -292,10 +385,18 @@ local function printFull(r)
     end
     print(fmt('  players %d%s', r.players or 0, r.entities and fmt(', entities: %d vehicles, %d peds, %d objects',
         r.entities.vehicles, r.entities.peds, r.entities.objects) or ''))
+    local f = r.entityFlow
+    if f and (f.created > 0 or f.removed > 0) then
+        local kinds, owners = {}, {}
+        for _, k in ipairs(f.kinds) do kinds[#kinds + 1] = k.key .. ' ' .. k.value end
+        for _, o in ipairs(f.owners) do owners[#owners + 1] = o.key .. ' ' .. o.value end
+        print(fmt('  entities in the last %d s: %d created, %d removed. Created: %s. By: %s', f.seconds, f.created,
+            f.removed, table.concat(kinds, ', '), table.concat(owners, ', ')))
+    end
     if r.host then
         local h = r.host
-        print(fmt('  machine: load %.2f on %d cores, CPU %.0f %% busy, FXServer process %.0f %% of one core, %d MB free',
-            h.load1 or 0, h.cores or 0, h.machine or 0, h.proc or 0, h.memFreeMb or 0))
+        print(fmt('  machine: %s%d cores, CPU %.0f %% busy, FXServer process %.0f %% of one core, %d MB free',
+            h.load1 and fmt('load %.2f on ', h.load1) or '', h.cores or 0, h.machine or 0, h.proc or 0, h.memFreeMb or 0))
     end
     if r.recent then
         for _, sec in ipairs({ { 'sent', 'client events, bytes x players' }, { 'bags', 'state bag writes' },
@@ -382,6 +483,7 @@ local function finalize(inc)
     end
     r.players = GetNumPlayerIndices()
     r.entities = entityCounts()
+    r.entityFlow = recentEntities(30)
     r.host = host()
     if (r.kinds.network or r.kinds.sync) and lastSample then
         local t = now()
@@ -504,16 +606,37 @@ end
 
 -- console warnings. The listener sees every console line: it only queues, the frame thread does the rest
 local consoleQueue = {}
+local errorQueue, errorTail = {}, 0
 if RegisterConsoleListener then
     -- FXServer prints them on its own channel (citizen-server-impl); a script printing the same text is ignored
     -- (`set hitchhunter_test_console 1` accepts script lines too, to test without real hitches)
     local scriptsToo = GetConvarInt('hitchhunter_test_console', 0) == 1
-    RegisterConsoleListener(function(channel, message)
-        if type(message) == 'string' and message:find('hitch warning', 1, true)
+    -- never throws: an error here would print a line that comes back here
+    local function listen(channel, message)
+        if type(message) ~= 'string' then return end
+        if message:find('hitch warning', 1, true)
             and (scriptsToo or not (type(channel) == 'string' and channel:sub(1, 7) == 'script:')) then
             consoleQueue[#consoleQueue + 1] = { now(), message }
+        elseif cfg.scriptErrorLog and type(channel) == 'string' and channel:sub(1, 7) == 'script:'
+            and channel ~= 'script:' .. HH then
+            -- a SCRIPT ERROR and the stack lines right after it ("> ..."), written to logs/ by the frame thread
+            local keep = false
+            if message:find('SCRIPT ERROR', 1, true) then
+                errorTail, keep = 20, true
+            elseif errorTail > 0 then
+                local m = message:match('^%s*(.-)%s*$')
+                if m:sub(1, 1) == '>' then
+                    errorTail, keep = errorTail - 1, true
+                elseif m ~= '' then
+                    errorTail = 0
+                end
+            end
+            if keep and #errorQueue < 400 then
+                errorQueue[#errorQueue + 1] = os.date('%H:%M:%S ') .. '[' .. channel:sub(8) .. '] ' .. (message:gsub('\x1b%[[%d;]*m', ''):gsub('%^%d', ''))
+            end
         end
-    end)
+    end
+    RegisterConsoleListener(function(channel, message) pcall(listen, channel, message) end)
 else
     print('^3[hitchhunter]^7 this FXServer build has no RegisterConsoleListener: network / sync hitches are not seen')
 end
@@ -548,6 +671,15 @@ CreateThread(function()
                 end
             end
         end
+        if #errorQueue > 0 then
+            local q = errorQueue
+            errorQueue = {}
+            local f = io.open(fmt('@%s/logs/script-errors-%s.log', HH, os.date('%Y-%m-%d')), 'a')
+            if f then
+                for _, line in ipairs(q) do f:write(line:sub(-1) == '\n' and line or (line .. '\n')) end
+                f:close()
+            end
+        end
         if #openList > 0 then
             local keep = {}
             for _, inc in ipairs(openList) do
@@ -577,6 +709,31 @@ CreateThread(function()
         prevSample = lastSample
         lastSample = { at = now(), data = pending[id] }
         pending[id] = nil
+    end
+end)
+
+-- ------------------------------------------------------------------------------------------------------------------
+-- logs/status.json every minute: what is wrapped (and how), what was seen. For other tools (a panel, a bot) and to
+-- check an install without the console.
+CreateThread(function()
+    if not cfg.statusFile then return end
+    Wait(20000)
+    while true do
+        local res = {}
+        for name, r in pairs(runtimes) do
+            res[name] = {
+                lua = r.lua and { v = r.lua.v, hooks = #r.lua.hooks } or nil,
+                js = r.js and { v = r.js.v, hooks = #r.js.hooks } or nil,
+            }
+        end
+        local g = gapStats()
+        local status = {
+            at = os.date('%Y-%m-%d %H:%M:%S'), resource = HH, wrapped = res, counts = counts, reports = #reports,
+            frames = g and { medianMs = g.median / MS, p95Ms = g.p95 / MS, maxNormalMs = g.max / MS } or nil,
+            consoleListener = RegisterConsoleListener ~= nil, lastReport = reports[#reports],
+        }
+        SaveResourceFile(HH, 'logs/status.json', json.encode(status), -1)
+        Wait(60000)
     end
 end)
 
@@ -669,6 +826,14 @@ local function cmdSync(src, args)
     table.sort(ents, function(a, b) return a.n / a.secs > b.n / b.secs end)
     local e = entityCounts()
     out(src, fmt('^3[hitchhunter]^7 entities now: %s', e and fmt('%d vehicles, %d peds, %d objects', e.vehicles, e.peds, e.objects) or '?'))
+    local f = recentEntities(60)
+    out(src, fmt('last 60 s, every entity (scripts and players\' games): %d created, %d removed', f.created, f.removed))
+    for _, k in ipairs(f.kinds) do out(src, fmt('  %6d  %s', k.value, k.key)) end
+    if #f.owners > 0 then
+        local parts = {}
+        for _, o in ipairs(f.owners) do parts[#parts + 1] = o.key .. ' ' .. o.value end
+        out(src, '  created by: ' .. table.concat(parts, ', '))
+    end
     out(src, 'state bag writes (per min, avg bytes):')
     for i = 1, math.min(n, #bags) do
         local r = bags[i]

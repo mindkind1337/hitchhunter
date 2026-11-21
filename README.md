@@ -66,6 +66,12 @@ FXServer runs three threads that can hitch. hitchhunter sees them without touchi
   hitchhunter asks every wrapped resource for its counters; the difference is what was sent (bytes x players),
   written to state bags and created as entities just before the hitch. Plus player and entity counts and the
   machine's load.
+* **Every entity, whoever made it.** The sync thread's work grows with the entities it syncs, and most are not
+  made by server scripts: ambient peds and cars, vehicles and props spawned by players' games. hitchhunter listens to
+  `entityCreated` (fired for entities a player's game made, after `entityCreating`), `serverEntityCreated` (entities
+  a server script made) and `entityRemoved` (both in FXServer's `ServerGameState.cpp`), keeps them per second for two
+  minutes by type (ped / vehicle / object, ambient or spawned) and by the player whose game made them. A sync hitch
+  report says "412 entities created in the last 30 s, most by Name [12]: 380"; `hh sync` shows the last minute.
 
 ## What is hooked, and where
 
@@ -117,18 +123,33 @@ names, exactly where a `scheduler.lua` patch would.
 Not touched: `AddEventHandler`, `RegisterNetEvent`, `RemoveEventHandler`, `source`, msgpack, the event dispatch
 itself, anything on the client.
 
-### JS (`inject/server.js`, in each resource's server JS runtime)
+### JS and TypeScript (`inject/server.js`, in each resource's server JS runtime)
+
+TypeScript resources run the JS they were compiled to (`dist/*.js`), so they are covered exactly like JS.
 
 | replaced | what for |
 |---|---|
+| `runWithBoundaryStart` | FiveM runs **everything** of a JS resource through this global: each frame's tick (timer.js) and each event / ref call (main.js). The tick is cut in phases (see below) |
 | `addEventListener`, `on`, `AddEventHandler` (`onNet` / `addNetEventListener` call `addEventListener`) | times every handler, `event <name>` |
 | `removeEventListener` | maps the original callback to the timed one, so removing still works |
 | `exports` (a Proxy around the stock one) | registering: times the export function; `exports.res.fn()`: pauses own time while the other resource runs |
 | `emitNet`, `TriggerClientEvent`, `TriggerLatentClientEvent` | counts sends (no byte size: the JS runtime packs internally) |
 | `emit`, `TriggerEvent` | counts local events, pauses own time while other handlers run |
 
-Cannot be replaced: `setTick`, `setTimeout`, `setInterval`, `setImmediate` (FiveM's `timer.js` defines them
-read-only). Code after an `await` runs outside any handler.
+`setTick`, `setTimeout`, `setInterval` and `setImmediate` cannot be replaced (FiveM's `timer.js` defines them
+read-only), so their callbacks are not named one by one. Instead each frame's tick of a resource is timed in two
+phases, using the order `timer.js` runs things in: the wrapper registers the resource's **first** timer
+(`setInterval(fn, 0)`) and **first** ticker (`setTick`), which run before any other of their kind, and switches
+phase when each runs:
+
+| label | contains |
+|---|---|
+| `js timers (setTimeout / setInterval)` | every `setTimeout`, `setInterval`, `setImmediate` callback of the resource in that frame |
+| `js setTick + code after await` | every `setTick` callback, animation frames, then `process.nextTick` callbacks and promise continuations: the code after an `await` in any async function of the resource |
+| `js event / ref call dispatch` | unpacking the payload and dispatching an event or ref call (the handlers themselves are timed by name) |
+
+So a JS freeze always says which resource, and whether it was an event handler (by name), an export (by name), a
+timer or a tick / `await` continuation.
 
 ### What changes, visibly
 
@@ -161,7 +182,8 @@ read-only). Code after an `await` runs outside any handler.
    python3 inject.py --apply
    ```
    Only manifests of resources with server Lua / JS are touched. Use `--running http://127.0.0.1:30120/info.json` to
-   limit it to what your server runs, `--only a,b` / `--exclude a,b` to pick.
+   limit it to what your server runs, `--only a,b` / `--exclude a,b` to pick, `--skip-folder "[shared]/[x]"` to
+   never touch a folder (one another server also loads, for example). On Windows run it with `python` or `py`.
 4. Restart the server. Each resource picks the line up when it starts; `hh coverage` lists the ones that run without it.
 
 Resource updates that replace a `fxmanifest.lua` remove the line: run `inject.py --apply` again after updating.
@@ -183,7 +205,16 @@ To remove everything: `python3 inject.py --remove --apply`.
 | `hh reset` | start every counter again |
 | `hh test <ms>` | freeze the server thread for `<ms>` to see a report come out |
 
-Reports are also written to `logs/hitches-YYYY-MM-DD.jsonl` (one JSON per hitch) and, optionally, sent to Discord.
+Files in `logs/` (inside the resource folder):
+
+| file | |
+|---|---|
+| `hitches-YYYY-MM-DD.jsonl` | every report, one JSON per line |
+| `status.json` | rewritten every minute: wrapped resources (Lua / JS, how many functions replaced), hitch counts, frame times, the last report. To check an install without the console, or for a panel / bot |
+| `script-errors-YYYY-MM-DD.log` | every `SCRIPT ERROR` of the console with its stack lines (off: `Config.scriptErrorLog = false`) |
+| `inject.log` | every manifest `tools/inject.py` changed, with before / after hashes |
+
+Reports can also be sent to Discord.
 
 ## Configuration
 
@@ -211,6 +242,21 @@ Convars (`server.cfg`):
 * **network / sync only**: the main thread kept running. The report lists what was sent (bytes x players), the
   state bag writes and the entity natives just before.
 
+## Windows and Linux
+
+Everything uses what FiveM provides on both: `os.nanotime` (FiveM's Lua `os` library,
+`citizen-scripting-lua/src/LuaOS.cpp`, `std::chrono::high_resolution_clock`), `RegisterConsoleListener`,
+`@resource/` file paths, Node's `process.hrtime` / `os.cpus()` / `process.cpuUsage()`. No file outside the resource
+is read (FiveM's Node permission model refuses `/proc` anyway). Only difference: Windows has no load average, so
+the machine line shows CPU use only. `tools/inject.py` handles `\` paths, `[brackets]` and CRLF manifests (kept as
+they are).
+
+Lua and JS read different clocks (on Linux `os.nanotime` follows the wall clock, `process.hrtime` does not): the
+offset between them is measured each time a JS resource answers the collector (at start and every 30 s), so a clock
+adjustment cannot shift JS slices for long.
+
+Tested on Linux (FXServer 37655 and 38435). Not tested on a Windows server yet.
+
 ## Cost
 
 Measured on FXServer 37655 (Linux), the same loops with and without the wrapper (`hitchhunter_inject 0`):
@@ -233,9 +279,8 @@ export return values and errors, `Await` resolve / reject, commands, `RemoveEven
 
 ## Limits
 
-* JS: FiveM defines `setTick`, `setTimeout`, `setInterval` and `setImmediate` read-only, so they cannot be wrapped,
-  and code after an `await` runs outside the wrapper. JS event handlers and exports are covered. JS send counts have
-  no byte sizes.
+* JS send counts have no byte sizes (the JS runtime packs the payload internally).
+* JS timers and ticks are timed per resource and phase, not per callback (see above).
 * C# resources are not covered.
 * Escrowed (encrypted) code has no file names: its handlers show as `@?:-1`, with the event / export name.
 * Cross-resource calls: `hh top` totals include what a handler waited for in another resource (only hitch reports

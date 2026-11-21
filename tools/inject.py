@@ -9,6 +9,9 @@
     python3 inject.py --running URL      only resources a running server lists, e.g. http://127.0.0.1:30120/info.json
     python3 inject.py --resources PATH   the server's resources folder (default: the nearest parent folder named
                                          "resources" of this tool)
+    python3 inject.py --skip-folder X,Y  never touch resources under these folders (relative to resources/, e.g.
+                                         "[dev]/[jen]" for a folder another server shares)
+On Windows: `python inject.py` (or `py inject.py`).
 
 Which line goes where:
     resource with server Lua and client Lua:  shared_script '@hitchhunter/inject/server.lua'
@@ -119,12 +122,15 @@ def main(argv):
     apply = '--apply' in argv
     remove = '--remove' in argv
     only = exclude = running = None
+    skip_folders = []
     for i, a in enumerate(argv):
         if i + 1 < len(argv):
             if a == '--only':
                 only = set(argv[i + 1].split(','))
             elif a == '--exclude':
                 exclude = set(argv[i + 1].split(','))
+            elif a == '--skip-folder':
+                skip_folders = [s.strip().strip('/\\').replace('\\', '/') for s in argv[i + 1].split(',') if s.strip()]
             elif a == '--running':
                 try:
                     running = set(json.load(urllib.request.urlopen(argv[i + 1], timeout=5)).get('resources', []))
@@ -147,6 +153,10 @@ def main(argv):
             skipped.setdefault('backup copy', []).append(rel)
             continue
         if (only and res not in only) or (exclude and res in exclude):
+            continue
+        relpath = rel.replace(os.sep, '/')
+        if any(relpath.startswith(f + '/') for f in skip_folders):
+            skipped.setdefault('in a --skip-folder', []).append(rel)
             continue
         if res in SYSTEM_RESOURCES:
             skipped.setdefault('system resource (FiveM loads its own copy)', []).append(rel)
