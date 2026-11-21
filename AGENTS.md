@@ -126,7 +126,7 @@ starts [n] | reset | how | test <ms>`. `hh how` prints how each problem is found
 | `js timers (setTimeout / setInterval)` | all JS timer callbacks of that resource in that frame |
 | `js setTick + code after await` | JS setTick callbacks, nextTick and promise continuations |
 | `js event / ref call dispatch` | unpacking + dispatching a JS event / ref call (the handler is its own span) |
-| `?:-1`, `@?` in a file | escrowed (encrypted) code: no file or line, the resource and event / export name are still right |
+| `escrow:<line>` in place of a file | escrowed (encrypted) code: FiveM strips its debug info, so no file name; the resource, the event / export / command name and the line are right. Escrowed resources are injected and timed like the others (their manifest is not encrypted) |
 
 ## How to diagnose a hitch
 

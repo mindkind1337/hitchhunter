@@ -185,7 +185,10 @@ end
 
 -- ------------------------------------------------------------------------------------------------------------------
 -- labels
+-- escrowed (encrypted) code has no debug info: its source name is "?" (or "=?"). It still has its resource, its event /
+-- export / command name and the line its function starts on, so it shows as "escrow:<line>"
 local function shortSrc(src)
+	if src == '?' or src == '=?' then return 'escrow' end
 	src = src:gsub('^@', '')
 	if src:sub(1, #RES + 1) == RES .. '/' then src = src:sub(#RES + 2) end
 	return (src:gsub('^citizen:/scripting/lua/', ''))

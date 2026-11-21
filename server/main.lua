@@ -1040,6 +1040,7 @@ local HOW = {
     '  sync thread ................... FXServer warning + entities created/removed and by whom (hh sync)',
     '  whole process stalled ......... server + network + sync together, no script: the machine, not a resource',
     '  C# / no wrapper ............... outside wrapped scripts (hh coverage)',
+    '  escrowed (encrypted) code ..... timed like the rest; no file name: <kind> <name> escrow:<line>',
 }
 
 local HELP = {

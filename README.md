@@ -78,6 +78,26 @@ What each kind of problem looks like (real reports from the test resources and a
 | the whole process stalled (machine overloaded, VM pause, disk / swap) | the three threads stall at once while no wrapped script runs; the machine's CPU / load | `server 558 ms + network 516 ms + sync 512 ms`, "the whole process was held up ... not one resource script" |
 | C#, FiveM's own resources, a resource without the wrapper | the freeze is outside every span | "outside wrapped scripts"; `hh coverage` lists the unwrapped ones |
 
+## Escrowed (encrypted) resources
+
+**Covered like any other resource.** FiveM's escrow encrypts a resource's script files, not its `fxmanifest.lua`, so
+`inject.py` adds the line there too. The line loads hitchhunter's own file (not encrypted) first in the same
+runtime; the escrowed code then registers its handlers, threads and exports through the replaced functions, which
+time them like any other.
+
+Checked on a copy of a 183-resource server: 57 escrowed resources, the 35 with server scripts all wrapped (`hh
+coverage`, `status.json`); the other 22 are asset-only (props, maps, MLOs) with no server script, so nothing to time.
+
+What a report knows about escrowed code, and what it cannot:
+
+| known | not known |
+|---|---|
+| the resource; what ran (event / export / command / thread / timeout / callback) with the event, export or command name; the line its function starts on; own and total time; what it sent, created, wrote to state bags; the file names it read or wrote (`io LoadResourceFile data.json`) | the source file name: FiveM strips the debug info of escrowed code, so the label shows `escrow:<line>` instead of `<file>:<line>` |
+
+Examples (real labels): `rtx_ghosthunting thread escrow:4568`, `rtx_ghosthunting event onResourceStart escrow:6743`,
+and a file the vendor left unencrypted (`escrow_ignore`) keeps its name: `callback server/other.lua:390`.
+A vendor update replaces the manifest: run `inject.py --apply` again after updating.
+
 ## Coverage: what is seen, what is not
 
 **Seen and named** (resource + handler / thread / export / file and line):
@@ -370,7 +390,8 @@ export return values and errors, `Await` resolve / reject, commands, `RemoveEven
 * JS send counts have no byte sizes (the JS runtime packs the payload internally).
 * JS timers and ticks are timed per resource and phase, not per callback (see above).
 * C# resources are not covered.
-* Escrowed (encrypted) code has no file names: its handlers show as `@?:-1`, with the event / export name.
+* Escrowed (encrypted) code has no file names: its handlers show as `escrow:<line>`, with the event / export name
+  (see "Escrowed (encrypted) resources").
 * Cross-resource calls: `hh top` totals include what a handler waited for in another resource (only hitch reports
   split own time across resources).
 * Lua code that yields with `coroutine.yield` itself (not `Wait` / `Await`) could make a slice look longer than it
