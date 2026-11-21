@@ -19,7 +19,9 @@ Which line goes where:
         the client copy returns at once)
     resource with server Lua only:            server_script '@hitchhunter/inject/server.lua'
         (a shared_script would make every player's game create a Lua runtime for nothing)
-    resource with server JS:                  server_script '@hitchhunter/inject/server.js'
+    resource with shared JS:                  shared_script '@hitchhunter/inject/server.js'
+        (the client copy returns before accessing server APIs)
+    resource with server JS only:             server_script '@hitchhunter/inject/server.js'
     no server script, or C# only:             nothing
 The line goes right before the manifest's first script declaration (after another tool's lines marked
 "keep first"). Line endings and encoding are kept. A resource picks the line up the next time it starts.
@@ -43,6 +45,7 @@ LINES = {
     'lua_shared': "shared_script '@%s/inject/server.lua' %s" % (NAME, TAG),
     'lua_server': "server_script '@%s/inject/server.lua' %s" % (NAME, TAG),
     'js': "server_script '@%s/inject/server.js' %s" % (NAME, TAG),
+    'js_shared': "shared_script '@%s/inject/server.js' %s" % (NAME, TAG),
 }
 MARK = '@%s/inject/server.' % NAME
 # FiveM loads these from its own citizen/system_resources: a copy under resources/ is never used
@@ -55,7 +58,16 @@ DECL = {
     'client': re.compile(r'\bclient_scripts?\b\s*' + VALUE, re.S),
     'shared': re.compile(r'\bshared_scripts?\b\s*' + VALUE, re.S),
 }
-FIRST_SCRIPT = re.compile(r'^[ \t]*(shared_scripts?|client_scripts?|server_scripts?)\b', re.M)
+# Remove only standalone wrapper declarations, never a comment mentioning the path.
+WRAPPER_LINE = re.compile(
+    r"^[ \t]*(?:shared|server)_script[ \t]+(['\"])" + re.escape(MARK)
+    + r"(?:lua|js)\1[ \t]*(?:--[^\r\n]*)?(?:\r?\n|$)", re.M)
+
+
+def without_wrappers(text):
+    code = COMMENT.sub(lambda c: re.sub(r'[^\r\n]', ' ', c.group(0)), text)
+    return WRAPPER_LINE.sub(
+        lambda m: '' if code[m.start():m.end()].strip() else m.group(0), text)
 
 
 def find_root(argv):
@@ -165,20 +177,21 @@ def main(argv):
             skipped.setdefault('not running on that server', []).append(rel)
             continue
 
-        raw = open(path, 'rb').read()
+        with open(path, 'rb') as manifest:
+            raw = manifest.read()
         text = raw.decode('utf-8', errors='surrogateescape')
+        bom = '\ufeff' if text.startswith('\ufeff') else ''
+        text = text[len(bom):]
         nl = '\r\n' if '\r\n' in text else '\n'
+        original = text
+        text = without_wrappers(text)
 
         if remove:
-            if MARK not in text:
+            if text == original:
                 continue
-            text = nl.join(l for l in text.split(nl) if MARK not in l)
             label = rel
         else:
-            if MARK in text:
-                already.append(rel)
-                continue
-            code = COMMENT.sub('', text)
+            code = COMMENT.sub(lambda c: re.sub(r'[^\r\n]', ' ', c.group(0)), text)
             shared = entries(code, 'shared')
             server_langs = languages(entries(code, 'server') + shared, resdir)
             client_langs = languages(entries(code, 'client') + shared, resdir)
@@ -186,30 +199,41 @@ def main(argv):
             if 'lua' in server_langs:
                 block.append(LINES['lua_shared'] if 'lua' in client_langs else LINES['lua_server'])
             if 'js' in server_langs:
-                block.append(LINES['js'])
+                # Shared scripts execute before server scripts, regardless of manifest
+                # line order. Install before shared JS registers handlers/exports.
+                block.append(LINES['js_shared'] if 'js' in languages(shared, resdir) else LINES['js'])
             if not block:
                 skipped.setdefault('no server Lua / JS script', []).append(rel)
                 continue
             ins = ''.join(l + nl for l in block)
-            blanked = COMMENT.sub(lambda c: ' ' * len(c.group(0)), text)
-            m = FIRST_SCRIPT.search(blanked)
-            if m:
-                pos = m.start()
-                # keep another tool's "keep first" lines (e.g. an anticheat wrapper) before ours
-                while True:
-                    end = text.find('\n', pos)
-                    if end < 0 or 'keep first' not in text[pos:end]:
-                        break
-                    pos = end + 1
-                text = text[:pos] + ins + text[pos:]
-            else:
-                text = text.rstrip('\r\n') + nl + nl + ins
-            kinds = [('lua shared' if l == LINES['lua_shared'] else 'lua server' if l == LINES['lua_server'] else 'js') for l in block]
+            # Insert at the start of the first declaration's physical line. This
+            # also handles compact manifests (metadata and scripts on one line)
+            # without adding/removing any bytes of the original line.
+            declarations = sorted((m for pattern in DECL.values() for m in pattern.finditer(code)),
+                                  key=lambda m: m.start())
+            pos = None
+            for declaration in declarations:
+                start = text.rfind('\n', 0, declaration.start()) + 1
+                end = text.find('\n', declaration.end())
+                end = len(text) if end < 0 else end
+                if 'keep first' in text[start:end]:
+                    continue
+                pos = start
+                break
+            if pos is None:
+                skipped.setdefault('no safe insertion point after keep-first declarations', []).append(rel)
+                continue
+            text = text[:pos] + ins + text[pos:]
+            if text == original:
+                already.append(rel)
+                continue
+            kinds = [('lua shared' if l == LINES['lua_shared'] else 'lua server' if l == LINES['lua_server'] else 'js shared' if l == LINES['js_shared'] else 'js server') for l in block]
             label = '%s  [%s]' % (rel, ' + '.join(kinds))
         changed.append(label)
         if apply:
-            out = text.encode('utf-8', errors='surrogateescape')
-            open(path, 'wb').write(out)
+            out = (bom + text).encode('utf-8', errors='surrogateescape')
+            with open(path, 'wb') as manifest:
+                manifest.write(out)
             log_change(res, rel, 'removed' if remove else 'added', raw, out)
 
     verb = ('removed from' if remove else 'added to') if apply else ('would be removed from' if remove else 'would be added to')

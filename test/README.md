@@ -23,3 +23,12 @@ CreateObjectNoOffset 2000 times; DeleteEntity 2000 times".
 To see the three threads stall together (what a starved machine looks like), pause the test server's process for
 a moment from a shell: `kill -STOP <pid>; sleep 0.5; kill -CONT <pid>`. hitchhunter reports server + network + sync
 "while no wrapped script was running: the whole process was held up".
+
+## Injector regression tests
+
+Run `python3 -m unittest discover -s test -p "test_*.py" -v` from the repository root. These tests use temporary
+resources and do not require FXServer. They cover injection order, migration, dry runs, idempotence, exact
+removal, CRLF, UTF-8 BOMs, compact manifests, shared JS and keep-first declarations.
+
+Run `node test/client-guard.js` to check that the shared JS wrapper exits before using server APIs in a
+simulated client context. This does not replace a connected-client integration check.

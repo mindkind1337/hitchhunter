@@ -12,8 +12,9 @@ server_scripts {
     'server/host.js',
 }
 
--- inject/server.lua is included by other resources as a shared_script: clients need to be able to load it
--- (it returns at once on the client)
+-- Wrappers may be included as shared_script: clients must be able to load them.
+-- Both return at once on the client.
 files {
     'inject/server.lua',
+    'inject/server.js',
 }

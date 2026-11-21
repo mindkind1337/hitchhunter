@@ -144,7 +144,8 @@ own script runtime, in memory:
      like, which keep local copies of functions). The client copy stops at its first line (`IsDuplicityVersion()`).
    * `server_script '@hitchhunter/inject/server.lua'` when the resource has server Lua only (a shared script would
      make every player's game create a Lua runtime for nothing).
-   * `server_script '@hitchhunter/inject/server.js'` when the resource has server JS.
+   * `shared_script '@hitchhunter/inject/server.js'` when the resource has shared JS (the client copy returns immediately).
+   * `server_script '@hitchhunter/inject/server.js'` when its JS runs only through server declarations.
    * Lines another tool marks "keep first" (an anticheat wrapper, for example) stay before it.
 2. When the resource starts, that file replaces some functions of that resource's runtime (the table below), then
    the resource's own scripts load and use them without knowing.
@@ -255,6 +256,9 @@ timer or a tick / `await` continuation.
 4. Restart the server. Each resource picks the line up when it starts; `hh coverage` lists the ones that run without it.
 
 Resource updates that replace a `fxmanifest.lua` remove the line: run `inject.py --apply` again after updating.
+Rerunning the injector also repairs existing standalone wrapper lines: it updates shared-JS declarations and
+moves wrappers before scripts in compact manifests. UTF-8 BOMs and original line endings are preserved.
+As with initial installation, repairs take effect at the resource's next start.
 To remove everything: `python3 inject.py --remove --apply`.
 
 ## Commands (server console, or in game with the `command.hh` ace)
