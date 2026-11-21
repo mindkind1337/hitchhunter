@@ -91,6 +91,26 @@ AddEventHandler(HH .. ':span', function(res, key, t0, d, kind)
     spans[(spanN - 1) % SPANS + 1] = { res = res, key = key, t0 = t0, t1 = t0 + d, d = d, kind = kind }
 end)
 
+-- resource starts: loading a resource's scripts runs outside any handler (its top-level code), so it is timed here,
+-- from onResourceStarting to onResourceStart (a live `restart x` / `ensure x` is a classic hitch)
+local SPAN_NS = math.max(1, GetConvarInt('hitchhunter_span_ms', 5)) * MS
+local startingAt, startTimes = {}, {}
+AddEventHandler('onResourceStarting', function(res)
+    if type(res) == 'string' then startingAt[res] = now() end
+end)
+AddEventHandler('onResourceStart', function(res)
+    local t0 = type(res) == 'string' and startingAt[res]
+    if not t0 then return end
+    startingAt[res] = nil
+    local t = now()
+    local d = t - t0
+    startTimes[res] = d
+    if d >= SPAN_NS then
+        spanN = spanN + 1
+        spans[(spanN - 1) % SPANS + 1] = { res = res, key = 'resource start (loading its scripts)', t0 = t0, t1 = t, d = d, kind = 'start' }
+    end
+end)
+
 local function spansIn(from, to)
     local out = {}
     local i, stop = spanN, math.max(1, spanN - SPANS + 1)
@@ -923,6 +943,15 @@ local function cmdHooks(src, args)
     out(src, '  (hh hooks <resource> for one resource)')
 end
 
+local function cmdStarts(src, args)
+    local n = tonumber(args[2]) or 15
+    local list = {}
+    for res, d in pairs(startTimes) do list[#list + 1] = { res, d } end
+    table.sort(list, function(a, b) return a[2] > b[2] end)
+    out(src, '^3[hitchhunter]^7 slowest resource starts since hitchhunter started (loading their scripts, on the server thread):')
+    for i = 1, math.min(n, #list) do out(src, fmt('  %8.1f ms  %s', list[i][2] / MS, list[i][1])) end
+end
+
 local function cmdLast(src, args)
     local n = tonumber(args[2]) or 10
     if #reports == 0 then return out(src, '^3[hitchhunter]^7 no hitch since start') end
@@ -968,6 +997,7 @@ local HELP = {
     'hh io [n]            file / json calls that block the thread',
     'hh coverage          which running resources are not wrapped',
     'hh hooks [resource]  what the wrapper replaced in memory (no FXServer file is modified)',
+    'hh starts [n]        the slowest resource starts (loading scripts blocks the server thread)',
     'hh reset             start all counters again',
     'hh test <ms>         busy-wait <ms> in an event handler of this resource (to see a report)',
 }
@@ -984,6 +1014,7 @@ RegisterCommand('hh', function(src, args)
     elseif sub == 'io' then cmdIo(src, args)
     elseif sub == 'coverage' then cmdCoverage(src)
     elseif sub == 'hooks' then cmdHooks(src, args)
+    elseif sub == 'starts' then cmdStarts(src, args)
     elseif sub == 'reset' then
         collectAll(0, true)
         out(src, '^3[hitchhunter]^7 counters reset in every wrapped resource')

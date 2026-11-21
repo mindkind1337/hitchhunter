@@ -38,6 +38,28 @@ what was sent or created in the seconds before.
   wrapped script and the machine is overloaded, or every thread stalls at once, the cause is the machine (or the
   engine), not a resource, and the report says so.
 
+## Coverage: what is seen, what is not
+
+**Seen and named** (resource + handler / thread / export / file and line):
+* Lua server code of every wrapped resource: event handlers, ref calls (exports, callbacks, commands, state bag
+  handlers), threads, timeouts.
+* JS / TypeScript server code: event handlers and exports by name; timers and `setTick` + code after `await` per
+  resource (`setTick` / `setTimeout` are read-only in FiveM, so not per callback).
+* Resource starts, wrapped or not (loading a resource's scripts runs outside any handler): `hh starts`, and a
+  `resource start` line in reports.
+* Blocking calls inside the code: `LoadResourceFile`, `SaveResourceFile`, `io.open`, `json.encode` / `decode`.
+
+**Seen, not named** (shown as "outside wrapped scripts", with the context):
+* Engine work on the server thread: OneSync bookkeeping, resource stops, FiveM's own resources (`chat`, `yarn`,
+  `webpack` builds, txAdmin's `monitor`), C# resources, a resource started without the manifest line.
+* The network and sync threads: the engine's own warning says how long; the report adds what was sent, written to
+  state bags, created as entities (by whom) just before, and the machine's load.
+
+**Not seen:**
+* Client side (players' games): only the server's three threads.
+* Main-thread freezes under `Config.frameHitchMs` (100 ms); network / sync stalls under the engine's own warning
+  threshold (it only prints from 150 ms on).
+
 ## How hitches are detected (no engine patch)
 
 FXServer runs three threads that can hitch. hitchhunter sees them without touching the engine:
@@ -53,6 +75,8 @@ FXServer runs three threads that can hitch. hitchhunter sees them without touchi
   only from that channel (a resource printing the same text is ignored). Network and sync threads cannot be timed
   from a script at all, so for them this warning is the only source; hitchhunter adds what it knows around it.
   On a build without `RegisterConsoleListener`, only the main thread is seen.
+* **Resource starts.** From `onResourceStarting` to `onResourceStart` (both fired by FiveM for every resource):
+  the time its scripts took to load, a classic freeze when a resource is restarted on a live server.
 * **Matching.** A frame gap gives the window; a console warning arrives right after the freeze and only says how
   long, so it joins the frame hitch of the closest length (or the run of back-to-back frame hitches it covers:
   FXServer's frames are not in phase with hitchhunter's). Network / sync warnings join a hitch seen within 2 s, or
@@ -202,6 +226,8 @@ To remove everything: `python3 inject.py --remove --apply`.
 | `hh sync [n]` | state bag writes and entity natives per minute, entity counts |
 | `hh io [n]` | blocking file / json calls |
 | `hh coverage` | started resources with server scripts that are not wrapped |
+| `hh hooks [resource]` | what the wrapper replaced in memory, in how many resources |
+| `hh starts [n]` | the slowest resource starts (loading a resource's scripts blocks the server thread) |
 | `hh reset` | start every counter again |
 | `hh test <ms>` | freeze the server thread for `<ms>` to see a report come out |
 
@@ -255,7 +281,15 @@ Lua and JS read different clocks (on Linux `os.nanotime` follows the wall clock,
 offset between them is measured each time a JS resource answers the collector (at start and every 30 s), so a clock
 adjustment cannot shift JS slices for long.
 
-Tested on Linux (FXServer 37655 and 38435). Not tested on a Windows server yet.
+Tested on Linux:
+* FXServer 37655, the test resources in `test/`: every case attributed, identical `hh_sem` output with and without
+  the wrapper.
+* FXServer 38435, a copy of a real 183-resource ESX Legacy server (ox, lb-phone, pma-voice, oxmysql...): 112 Lua and
+  4 JS runtimes wrapped (only `chat`, `webpack`, `yarn` left out: FiveM's own), the same 54 error lines with and
+  without the wrapper, and real culprits found at once (a resource doing 18,818 `LoadResourceFile` in one 869 ms
+  thread at start).
+
+Not tested on a Windows server yet.
 
 ## Cost
 
