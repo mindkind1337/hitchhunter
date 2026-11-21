@@ -12,7 +12,7 @@ start them after `hitchhunter`.
 | `hh_sem` | prints `SEM ...` lines: event arguments, export returns and errors, Await, commands, files... | identical lines with `set hitchhunter_inject 0` and without |
 | `hh_bench` | prints `BENCH ...` costs per call | compare with `set hitchhunter_inject 0` |
 | `hh_fake` | creates 40 objects, then prints fake network / sync warnings (needs `set hitchhunter_test_console 1`) | a network + sync report listing `CreateObjectNoOffset` from `hh_fake` |
-| `hh_trigger` | console command `hhx <test>`: a freeze on demand (event, thread, export, nested call, file write, json, JS event / timer / tick / await, 2000 entities, state bags, big sends, `all`) | each one named, see below |
+| `hh_trigger` | console command `hhx <test>`: a freeze on demand (event, thread, export, nested call, file write, json, JS event / timer / tick / await, 2000 entities, state bags, big sends, `aliases`: threads and timeouts started with and without `Citizen.`, `natives`: entities by name and by hash in Lua and JS, `all`) | each one named, see below |
 
 `hhx all` on a copy of a 183-resource server gave: `event hh_trigger:busy 300 ms`, `thread 250 ms`, `export busy 200 ms`,
 the nested call split into the export's 200 ms and the handler's own 21 ms, `json.decode 351 ms` + `json.encode

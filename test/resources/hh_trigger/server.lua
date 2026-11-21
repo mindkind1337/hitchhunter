@@ -10,6 +10,8 @@
 --   hhx entities <n>        create <n> networked objects at once, delete them 10 s later (sync thread context)
 --   hhx bags <n> <bytes>    <n> GlobalState writes of <bytes> each
 --   hhx send <n> <bytes>    <n> TriggerClientEvent(-1) of <bytes> each
+--   hhx aliases             threads / timeouts started with and without `Citizen.`
+--   hhx natives <n>         entity natives by name and by hash (Lua, JS), state bags from JS: all counted
 --   hhx all                 everything above, 6 s apart
 local RES = GetCurrentResourceName()
 
@@ -57,6 +59,31 @@ tests.send = function(n, bytes)
     local p = string.rep('y', tonumber(bytes) or 50000)
     for _ = 1, tonumber(n) or 200 do TriggerClientEvent('hh_trigger:x', -1, p) end
 end
+-- the same functions with and without `Citizen.`: each must show as its own thread / timeout line
+tests.aliases = function()
+    Citizen.CreateThread(function() busy(110) end)
+    CreateThread(function() busy(120) end)
+    Citizen.SetTimeout(0, function() busy(130) end)
+    SetTimeout(0, function() busy(140) end)
+    CreateThread(function() Citizen.Wait(0) busy(150) Wait(0) busy(160) end)
+end
+-- entity natives by name and by hash (Citizen.InvokeNative), in Lua; by name in JS; state bags from JS
+tests.natives = function(n)
+    n = tonumber(n) or 20
+    local model = GetHashKey('prop_barrier_work05')
+    local made = {}
+    for i = 1, n do
+        made[#made + 1] = CreateObjectNoOffset(model, 400.0 + i, 400.0, 70.0, true, true, false)
+        made[#made + 1] = Citizen.InvokeNative(0x58040420, model, 400.0 + i, 410.0, 70.0, true, true, false,
+            Citizen.ReturnResultAnyway(), Citizen.ResultAsInteger())
+    end
+    TriggerEvent('hh_trigger:jsnatives', n)
+    SetTimeout(2000, function()
+        for i, e in ipairs(made) do
+            if i % 2 == 0 then Citizen.InvokeNative(0xfaa3d236, e) else DeleteEntity(e) end
+        end
+    end)
+end
 tests.all = function()
     CreateThread(function()
         for _, step in ipairs({ { 'event', 300 }, { 'thread', 250 }, { 'export', 200 }, { 'nested', 200 }, { 'io', 60 },
@@ -72,7 +99,7 @@ end
 
 RegisterCommand('hhx', function(src, args)
     local fn = tests[args[1] or '']
-    if not fn then return print('[hh_trigger] hhx event|thread|export|nested|io|json|js|entities|bags|send|all [args]') end
+    if not fn then return print('[hh_trigger] hhx event|thread|export|nested|io|json|js|entities|bags|send|aliases|natives|all [args]') end
     print('[hh_trigger] ' .. table.concat(args, ' '))
     fn(args[2], args[3])
 end, true)

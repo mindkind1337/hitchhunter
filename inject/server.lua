@@ -458,6 +458,24 @@ for _, name in ipairs({ 'CreateVehicle', 'CreateVehicleServerSetter', 'CreatePed
 	end
 end
 
+-- the same natives called by hash, past their names: Citizen.InvokeNative(0xdd75460a, ...). FiveM's own native
+-- globals keep the InvokeNative they took when the runtime started, so nothing is counted twice
+local NATIVE_HASHES = {
+	[0xdd75460a] = 'CreateVehicle', [0x6ae51d4b] = 'CreateVehicleServerSetter', [0x0389ef71] = 'CreatePed',
+	[0x3000f092] = 'CreatePedInsideVehicle', [0x2f7aa05c] = 'CreateObject', [0x58040420] = 'CreateObjectNoOffset',
+	[0xfaa3d236] = 'DeleteEntity', [0x635e5289] = 'SetEntityRoutingBucket', [0x6504eb38] = 'SetPlayerRoutingBucket',
+	[0xd3a183a3] = 'SetEntityDistanceCullingRadius', [0x489e9162] = 'SetEntityOrphanMode',
+}
+if type(Citizen.InvokeNative) == 'function' then
+	local rawInvoke = Citizen.InvokeNative
+	Citizen.InvokeNative = function(hash, ...)
+		local name = NATIVE_HASHES[hash]
+		if name and ents[name] then ents[name] = ents[name] + 1 end
+		return rawInvoke(hash, ...)
+	end
+	hooked('Citizen.InvokeNative (the counted natives called by hash)')
+end
+
 -- blocking calls: timed one by one; a slow one becomes a span of its own ('io SaveResourceFile x'), shown inside
 -- the handler that made it
 local function ioStat(what)

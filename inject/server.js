@@ -288,6 +288,75 @@
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // entity natives and state bag writes, like the Lua half: by name (global.CreateVehicle...) and by hash
+    // (Citizen.invokeNativeByHash / Citizen.invokeNative; FiveM's own natives keep the one they took at start)
+    const ENT = {
+        CreateVehicle: 0xdd75460a, CreateVehicleServerSetter: 0x6ae51d4b, CreatePed: 0x0389ef71,
+        CreatePedInsideVehicle: 0x3000f092, CreateObject: 0x2f7aa05c, CreateObjectNoOffset: 0x58040420,
+        DeleteEntity: 0xfaa3d236, SetEntityRoutingBucket: 0x635e5289, SetPlayerRoutingBucket: 0x6504eb38,
+        SetEntityDistanceCullingRadius: 0xd3a183a3, SetEntityOrphanMode: 0x489e9162,
+    };
+    const ents = {};
+    const byHash = new Map();
+    for (const [name, hash] of Object.entries(ENT)) {
+        const raw = g[name];
+        if (typeof raw !== 'function') continue;
+        ents[name] = 0;
+        byHash.set(hash >>> 0, name);
+        try {
+            g[name] = function (...a) { ents[name]++; return raw.apply(this, a); };
+            hooks.push(name);
+        } catch (e) { /* read-only on this build: left alone */ }
+    }
+    const C = g.Citizen;
+    if (C && typeof C.invokeNativeByHash === 'function') {
+        const rawByHash = C.invokeNativeByHash;
+        try {
+            C.invokeNativeByHash = function (hi, lo, ...a) {
+                const n = hi === 0 ? byHash.get(lo >>> 0) : undefined;
+                if (n) ents[n]++;
+                return rawByHash.call(this, hi, lo, ...a);
+            };
+            hooks.push('Citizen.invokeNativeByHash (the counted natives called by hash)');
+        } catch (e) { /* read-only */ }
+    }
+    if (C && typeof C.invokeNative === 'function') {
+        const rawInvoke = C.invokeNative;
+        try {
+            C.invokeNative = function (hash, ...a) {
+                const h = typeof hash === 'string' ? parseInt(hash, 16) : hash;
+                const n = typeof h === 'number' ? byHash.get(h >>> 0) : undefined;
+                if (n) ents[n]++;
+                return rawInvoke.call(this, hash, ...a);
+            };
+            hooks.push('Citizen.invokeNative (the counted natives called by hash)');
+        } catch (e) { /* read-only */ }
+    }
+    // state bags: main.js's bag objects (Entity(x).state, Player(x).state, GlobalState) call this global
+    let bags = {}, bagKeys = 0;
+    const rawSetBag = g.SetStateBagValue;
+    if (typeof rawSetBag === 'function') {
+        try {
+            g.SetStateBagValue = function (bagName, key, data, size, ...rest) {
+                try {
+                    const kind = typeof bagName === 'string' ? ((/^[a-zA-Z]+/.exec(bagName) || [bagName])[0]) : '?';
+                    let k = kind + ':' + String(key);
+                    let s = bags[k];
+                    if (!s) {
+                        if (bagKeys >= MAX_KEYS) k = 'other';
+                        s = bags[k];
+                        if (!s) { s = [0, 0]; bags[k] = s; bagKeys++; }
+                    }
+                    s[0]++;
+                    s[1] += Number(size) || 0;
+                } catch (e) { /* never break a write */ }
+                return rawSetBag.call(this, bagName, key, data, size, ...rest);
+            };
+            hooks.push('SetStateBagValue');
+        } catch (e) { /* read-only */ }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // reports
     function top(t, field, limit) {
         const keys = Object.keys(t);
@@ -303,10 +372,11 @@
         const l = typeof limit === 'number' ? limit : null;
         rawEmit(EV_REPORT, reqId, RES, 'js', {
             since: startedAt, at: now(),
-            cpu: top(cpu, 1, l), sent: top(sent, 0, l), bags: {}, ents: {}, io: {}, events: top(events, null, l),
+            cpu: top(cpu, 1, l), sent: top(sent, 0, l), bags: top(bags, 0, l), ents, io: {}, events: top(events, null, l),
         });
         if (doReset) {
-            cpu = {}; cpuKeys = 0; sent = {}; sentKeys = 0; events = {}; eventKeys = 0;
+            cpu = {}; cpuKeys = 0; sent = {}; sentKeys = 0; events = {}; eventKeys = 0; bags = {}; bagKeys = 0;
+            for (const k of Object.keys(ents)) ents[k] = 0;
             startedAt = now();
             for (const rec of stack) rec.s = stat(rec.key);
         }

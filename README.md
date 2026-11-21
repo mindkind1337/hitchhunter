@@ -142,7 +142,14 @@ names, exactly where a `scheduler.lua` patch would.
 | the funcref metatable `__call` (one per runtime, shared by every function reference received from elsewhere: other resources' exports, callbacks, ESX player objects...) | pauses the resource's own time while the other resource's code runs | same |
 | `SetStateBagValue` (the native `Entity(x).state`, `Player(x).state` and `GlobalState` call) | counts writes and bytes per bag kind and key | same |
 | `CreateVehicle`, `CreateVehicleServerSetter`, `CreatePed`, `CreatePedInsideVehicle`, `CreateObject`, `CreateObjectNoOffset`, `DeleteEntity`, `SetEntityRoutingBucket`, `SetPlayerRoutingBucket`, `SetEntityDistanceCullingRadius`, `SetEntityOrphanMode` | counts calls | same (tail call) |
+| `Citizen.InvokeNative` | counts the natives above when a script calls them by hash (`Citizen.InvokeNative(0xdd75460a, ...)`); FiveM's own native globals keep the `InvokeNative` they took at start, so nothing is counted twice | same |
 | `LoadResourceFile`, `SaveResourceFile`, `io.open`, `json.encode`, `json.decode` | times each call; one of 5 ms or more becomes its own line in the report (`io SaveResourceFile data.json`) | same |
+
+Every function is replaced under both names a script can use: `Citizen.CreateThread` and `CreateThread`,
+`Citizen.Wait` and `Wait`, `Citizen.SetTimeout` and `SetTimeout` (scheduler.lua makes the short names aliases of the
+`Citizen.` ones; hitchhunter sets both, so `local Wait = Wait` in a resource gets the timed one too).
+`Citizen.CreateThreadNow` and `Citizen.Await` only exist under `Citizen.`. Natives exist under their name and by hash
+(`Citizen.InvokeNative`); server natives have no `N_0x...` aliases.
 
 Not touched: `AddEventHandler`, `RegisterNetEvent`, `RemoveEventHandler`, `source`, msgpack, the event dispatch
 itself, anything on the client.
@@ -159,6 +166,8 @@ TypeScript resources run the JS they were compiled to (`dist/*.js`), so they are
 | `exports` (a Proxy around the stock one) | registering: times the export function; `exports.res.fn()`: pauses own time while the other resource runs |
 | `emitNet`, `TriggerClientEvent`, `TriggerLatentClientEvent` | counts sends (no byte size: the JS runtime packs internally) |
 | `emit`, `TriggerEvent` | counts local events, pauses own time while other handlers run |
+| the entity natives (same list as Lua), `Citizen.invokeNativeByHash`, `Citizen.invokeNative` | counts them, by name and by hash |
+| `SetStateBagValue` (what main.js's `GlobalState` / `Entity(x).state` / `Player(x).state` call) | counts writes and bytes |
 
 `setTick`, `setTimeout`, `setInterval` and `setImmediate` cannot be replaced (FiveM's `timer.js` defines them
 read-only), so their callbacks are not named one by one. Instead each frame's tick of a resource is timed in two
