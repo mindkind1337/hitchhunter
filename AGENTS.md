@@ -55,6 +55,8 @@ python3 inject.py --running http://127.0.0.1:30120/info.json --skip-folder "[sha
 # full restart, then:  hh status  /  hh coverage  /  hh hooks
 python3 inject.py --remove --apply                   # uninstall (each resource is stock at its next start)
 ```
+A changed manifest is only read again after `refresh`: to test one resource, `refresh` then `restart <res>` (a plain
+`restart` keeps the manifest FXServer scanned at boot).
 Windows: `python` or `py` instead of `python3`. After a resource update replaces its `fxmanifest.lua`, run
 `inject.py --apply` again (it only adds what is missing; `inject.log` records every change with hashes).
 
@@ -166,7 +168,7 @@ starts [n] | reset | how | test <ms>`. `hh how` prints how each problem is found
 ## Testing
 
 1. Put `test/resources/*` in a `[hhtest]` folder of a TEST server (no players), inject them
-   (`inject.py --only hh_lua_a,hh_lua_b,hh_js_c,hh_sem,hh_bench,hh_fake,hh_trigger --apply`), start after hitchhunter.
+   (`inject.py --only hh_lua_a,hh_lua_b,hh_js_c,hh_sem,hh_bench,hh_fake,hh_trigger,hh_sharedjs --apply`), start after hitchhunter.
 2. **A/B**: run the server once with `+set hitchhunter_inject 0` and once without; `grep SEM` in both consoles, sort,
    diff: must be identical. `BENCH` lines give the cost per call.
 3. **Hitches on demand**: `hhx all` (or `hhx event|thread|export|nested|io|json|js <event|timer|tick|await>|entities|

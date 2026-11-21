@@ -1,7 +1,7 @@
 # Test resources
 
 Put the folders of `resources/` in a `[hhtest]` category of a **test** server (they freeze the server thread on
-purpose), add the wrapper with `tools/inject.py --only hh_lua_a,hh_lua_b,hh_js_c,hh_sem,hh_bench,hh_fake,hh_trigger --apply`,
+purpose), add the wrapper with `tools/inject.py --only hh_lua_a,hh_lua_b,hh_js_c,hh_sem,hh_bench,hh_fake,hh_trigger,hh_sharedjs --apply`,
 start them after `hitchhunter`.
 
 | resource | what it does | what hitchhunter should say |
@@ -32,3 +32,10 @@ removal, CRLF, UTF-8 BOMs, compact manifests, shared JS and keep-first declarati
 
 Run `node test/client-guard.js` to check that the shared JS wrapper exits before using server APIs in a
 simulated client context. This does not replace a connected-client integration check.
+
+`hh_sharedjs` registers its handler in a **shared** JS file. FiveM loads every `shared_script` before every
+`server_script` (citizen-scripting-core `ResourceScriptingComponent.cpp`), so the wrapper must be a `shared_script`
+there (what `inject.py` writes). Checked with `hhx emit hh_sharedjs:busy 220` (after `refresh` + `restart
+hh_sharedjs`): with a `server_script` wrapper line the report only says `hh_sharedjs js event / ref call dispatch
+220 ms` (right resource, handler not named); with the `shared_script` line, `hh_sharedjs event hh_sharedjs:busy
+220 ms`. Re-running `inject.py --apply` turns the old line into the new one.
