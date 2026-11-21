@@ -94,7 +94,7 @@ What a report knows about escrowed code, and what it cannot:
 |---|---|
 | the resource; what ran (event / export / command / thread / timeout / callback) with the event, export or command name; the line its function starts on; own and total time; what it sent, created, wrote to state bags; the file names it read or wrote (`io LoadResourceFile data.json`) | the source file name: FiveM strips the debug info of escrowed code, so the label shows `escrow:<line>` instead of `<file>:<line>` |
 
-Examples (real labels): `rtx_ghosthunting thread escrow:4568`, `rtx_ghosthunting event onResourceStart escrow:6743`,
+Examples (real labels): `vendor_res thread escrow:4568`, `vendor_res event onResourceStart escrow:6743`,
 and a file the vendor left unencrypted (`escrow_ignore`) keeps its name: `callback server/other.lua:390`.
 A vendor update replaces the manifest: run `inject.py --apply` again after updating.
 
