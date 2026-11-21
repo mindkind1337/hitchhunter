@@ -4,6 +4,10 @@
     python3 inject.py                    dry run: what would change, and why some resources are left alone
     python3 inject.py --apply            write the lines
     python3 inject.py --remove [--apply] take every hitchhunter line out again
+    python3 inject.py --verify           after removing: check that nothing of hitchhunter is left (read only):
+                                         no line in any manifest, every manifest byte-identical to what it was before
+                                         hitchhunter (hashes in logs/inject.log), nothing in the server's .cfg files,
+                                         no copy in FXServer's cache/files/
     python3 inject.py --only a,b         only these resources (folder names)
     python3 inject.py --exclude a,b      leave these out
     python3 inject.py --running URL      only resources a running server lists, e.g. http://127.0.0.1:30120/info.json
@@ -130,6 +134,81 @@ def log_change(res, rel, action, before, after):
         print('could not write %s: %s' % (path, e))
 
 
+def verify(root, server_root):
+    """Read only. Everything hitchhunter can leave behind, and whether it is still there."""
+    residue = []
+    # 1) any manifest still mentioning the wrapper (a standalone line, or the path anywhere outside a comment)
+    lines_left = []
+    for path in sorted(manifests(root)):
+        if os.path.abspath(os.path.dirname(path)) == SELF_DIR:
+            continue
+        with open(path, 'rb') as f:
+            text = f.read().decode('utf-8', errors='surrogateescape')
+        if MARK in COMMENT.sub('', text) or WRAPPER_LINE.search(text):
+            lines_left.append(os.path.relpath(path, root))
+    if lines_left:
+        residue.append('%d manifest(s) still load the wrapper (run: inject.py --remove --apply):' % len(lines_left))
+        residue += ['    ' + r for r in lines_left]
+    # 2) every manifest inject.py ever changed: back to the bytes it had before hitchhunter?
+    log = os.path.join(SELF_DIR, 'logs', 'inject.log')
+    original, identical, changed, missing = {}, [], [], []
+    if os.path.isfile(log):
+        with open(log, encoding='utf-8') as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get('action') == 'added' and e.get('path') not in original:
+                    original[e['path']] = e.get('before')
+        for rel, before in sorted(original.items()):
+            path = os.path.join(root, *rel.split('/'))
+            if not os.path.isfile(path):
+                missing.append(rel)
+                continue
+            with open(path, 'rb') as f:
+                now = hashlib.sha1(f.read()).hexdigest()[:12]
+            (identical if now == before else changed).append(rel)
+    # 3) the server's config files
+    cfg_lines = []
+    for name in sorted(os.listdir(server_root)) if os.path.isdir(server_root) else []:
+        if not name.endswith('.cfg'):
+            continue
+        with open(os.path.join(server_root, name), encoding='utf-8', errors='replace') as f:
+            for n, line in enumerate(f, 1):
+                code = line.split('#')[0].split('//')[0]
+                if NAME in code or 'command.hh' in code:
+                    cfg_lines.append('%s:%d: %s' % (name, n, line.strip()))
+    if cfg_lines:
+        residue.append('%d line(s) in the server config (remove them by hand):' % len(cfg_lines))
+        residue += ['    ' + l for l in cfg_lines]
+    # 4) FXServer's cache of the resource's files (what it served to players)
+    cache = os.path.join(server_root, 'cache', 'files', NAME)
+    if os.path.isdir(cache):
+        residue.append("FXServer's cache of it: %s (delete it while the server is stopped)" % cache)
+
+    print('manifests changed by inject.py (logs/inject.log): %d' % len(original))
+    print('  byte-identical to before hitchhunter: %d' % len(identical))
+    if changed:
+        print('  different from before hitchhunter: %d (no wrapper line left in them unless listed below: an update or '
+              'another edit happened since, not a hitchhunter residue)' % len(changed))
+        for rel in changed:
+            print('    ' + rel)
+    if missing:
+        print('  gone since (resource deleted or moved): %d' % len(missing))
+    if not os.path.isfile(log):
+        print('  (no logs/inject.log: only the scan for remaining lines below is possible)')
+    if residue:
+        print('RESIDUE FOUND:')
+        for l in residue:
+            print('  ' + l)
+        print('Last step once the list is empty: delete the folder %s' % SELF_DIR)
+        return 1
+    print('NO RESIDUE: no manifest loads the wrapper, no config line, no cache copy. Last step: delete the folder %s'
+          ' (it holds the logs). Each resource is stock again at its next start.' % SELF_DIR)
+    return 0
+
+
 def main(argv):
     apply = '--apply' in argv
     remove = '--remove' in argv
@@ -149,6 +228,12 @@ def main(argv):
                 except Exception as e:
                     sys.exit('cannot read the running resources from %s: %s' % (argv[i + 1], e))
     root = find_root(argv)
+    if '--verify' in argv:
+        server_root = os.path.dirname(root)
+        for i, a in enumerate(argv):
+            if a == '--server-root' and i + 1 < len(argv):
+                server_root = os.path.abspath(argv[i + 1])
+        sys.exit(verify(root, server_root))
 
     changed, already, skipped = [], [], {}
     for path in sorted(manifests(root)):

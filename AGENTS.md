@@ -56,6 +56,7 @@ python3 inject.py                                    # dry run: lists what would
 python3 inject.py --running http://127.0.0.1:30120/info.json --skip-folder "[shared]" --apply
 # full restart, then:  hh status  /  hh coverage  /  hh hooks
 python3 inject.py --remove --apply                   # uninstall (each resource is stock at its next start)
+python3 inject.py --verify                           # read only: any residue left? (exit 1 + list, or "NO RESIDUE")
 ```
 A changed manifest is only read again after `refresh`: to test one resource, `refresh` then `restart <res>` (a plain
 `restart` keeps the manifest FXServer scanned at boot).
@@ -169,6 +170,9 @@ starts [n] | reset | how | test <ms>`. `hh how` prints how each problem is found
 
 ## Testing
 
+0. **Unit tests** (temporary folders only): `python3 -m unittest discover -s test -p 'test_*.py'` (injector:
+   placement, CRLF / BOM, compact manifests, keep-first, migration, exact removal; `--verify`: clean, line left,
+   config line left, cache left, updated manifest) and `node test/client-guard.js` (the client copy does nothing).
 1. Put `test/resources/*` in a `[hhtest]` folder of a TEST server (no players), inject them
    (`inject.py --only hh_lua_a,hh_lua_b,hh_js_c,hh_sem,hh_bench,hh_fake,hh_trigger,hh_sharedjs --apply`), start after hitchhunter.
 2. **A/B**: run the server once with `+set hitchhunter_inject 0` and once without; `grep SEM` in both consoles, sort,

@@ -37,6 +37,22 @@ what was sent or created in the seconds before.
 > Checked on a 183-resource server: every escrowed resource with server scripts was wrapped.
 > [Details](#escrowed-encrypted-resources).
 
+## Trust: what it does and does not do
+
+* **Nothing leaves your server.** No telemetry, no update check, no outside request. The only network call is the
+  optional Discord webhook you set yourself (`hitchhunter_webhook`, off by default).
+* **No FXServer file is modified** (`scheduler.lua`, `main.js`... stay stock) and **no escrowed (encrypted) file is
+  read, decrypted or changed**: only one plain-text line per `fxmanifest.lua`, recorded with before / after hashes.
+* **Nothing hidden**: every file is plain Lua / JS / Python, MIT licensed, about 2,500 lines. No obfuscation, no
+  binary, no download at run time.
+* **It does not change what your resources do**: same arguments, return values, errors and timings of their own code
+  (checked, see [Safety evidence](#safety-evidence-what-is-proven-and-how-to-check-it-yourself)).
+* **It never stops anything**: no `dependency` line, so stopping or deleting hitchhunter never stops another resource;
+  `set hitchhunter_inject 0` turns every wrapper off at the next start.
+* **It leaves nothing behind**: `inject.py --remove --apply` takes the lines out, `inject.py --verify` proves every
+  manifest is byte-identical to before and that no config line or cache copy is left
+  (see [Removing it completely](#removing-it-completely-no-residue)).
+
 ## How it works
 
 * **Wrapper, server side, in every resource, escrowed (encrypted) ones included** (`inject/server.lua`,
@@ -88,6 +104,52 @@ What each kind of problem looks like (real reports from the test resources and a
 | a sync thread hitch | FXServer's warning; every entity created / removed (players' games and scripts) and by whom, entity natives, state bags | "412 entities created in the last 30 s (most by Name [12]: 380)", `hh sync` |
 | the whole process stalled (machine overloaded, VM pause, disk / swap) | the three threads stall at once while no wrapped script runs; the machine's CPU / load | `server 558 ms + network 516 ms + sync 512 ms`, "the whole process was held up ... not one resource script" |
 | C#, FiveM's own resources, a resource without the wrapper | the freeze is outside every span | "outside wrapped scripts"; `hh coverage` lists the unwrapped ones |
+
+## Safety evidence: what is proven, and how to check it yourself
+
+No test can prove that nothing will ever break for every resource ever written. What follows is what was checked,
+with the tools to repeat each check on your own server (do it on a test copy first: the test resources freeze the
+server on purpose).
+
+| claim | how it was checked | repeat it |
+|---|---|---|
+| resources behave the same | `test/resources/hh_sem` runs 34 checks (event arguments with `nil` holes, export returns and errors, error messages, `Await` resolve / reject, commands, `RemoveEventHandler` / `removeEventListener`, state bags, files, json, JS timers / ticks / promises) with the wrapper and without (`hitchhunter_inject 0`): identical output | `grep SEM` in both consoles, sort, diff |
+| a real server boots the same | a copy of a 183-resource ESX Legacy server booted twice, wrapper off then on: the same 54 error lines, no new error, none changed; 112 Lua + 4 JS runtimes wrapped | diff the `SCRIPT ERROR` / `Failed to load` lines of two boots |
+| the injector cannot damage a manifest | all 274 manifests of a production server run through `inject.py --apply` with writes redirected: every result valid Lua (`luac -p`), only hitchhunter's lines added, no other byte changed, CRLF and BOM kept; 13 unit tests in `test/test_inject.py` | `python3 -m unittest discover -s test -p 'test_*.py'` |
+| removal is exact | `--remove --apply` then `--verify` on 116 manifests: all 116 byte-identical to before hitchhunter | `inject.py --remove --apply && inject.py --verify` |
+| cheap | ~1 µs per handler / export call, 0.1 µs per `TriggerClientEvent` / json call, nothing on `Wait` | `test/resources/hh_bench`, with and without the wrapper |
+| it fails safe | every counter and the console listener run in `pcall`; per-resource tables capped at 3,000 keys; at most 40 messages per second per resource; the client copy of the wrapper returns at its first line (`test/client-guard.js`) | read `inject/server.lua`, `inject/server.js` |
+
+**What can still differ** (all known, none seen to break a resource):
+* a `SCRIPT ERROR` traceback has one more line, from `@hitchhunter/inject/server.lua`;
+* `debug.getinfo(Citizen.CreateThread)` and the like point at hitchhunter's file;
+* a resource that compares function identities (`Wait == someSavedWait`) or replaces these same functions itself
+  sees hitchhunter's versions;
+* tested on Linux (FXServer 37655, 38435), not yet on a Windows server.
+If anything looks wrong: `set hitchhunter_inject 0` (next start) or `inject.py --remove --apply`.
+
+## Removing it completely (no residue)
+
+What hitchhunter can leave on a server, all of it: the line in each manifest, its lines in `server.cfg`, its own
+folder (with `logs/`), FXServer's cached copy of its files (`cache/files/hitchhunter`), and in memory the replaced
+functions (gone when each resource restarts). It writes nothing else: no database, no KVP, no file anywhere else.
+
+1. `python3 tools/inject.py --remove --apply` (every manifest gets its original bytes back).
+2. Remove `ensure hitchhunter`, `add_ace ... command.hh ...` and any `set hitchhunter_*` from `server.cfg`.
+3. Stop the server, delete `cache/files/hitchhunter`.
+4. `python3 tools/inject.py --verify`. It must end with:
+   ```
+   manifests changed by inject.py (logs/inject.log): 116
+     byte-identical to before hitchhunter: 116
+   NO RESIDUE: no manifest loads the wrapper, no config line, no cache copy. Last step: delete the folder ...
+   ```
+   Anything left is listed (`RESIDUE FOUND`: which manifest, which config line, the cache folder) and the command
+   exits with code 1. A manifest a vendor update replaced after injection shows as "different from before
+   hitchhunter" but is checked for leftover lines like the others.
+5. Delete the `hitchhunter` folder and start the server: every resource is stock.
+
+Players' FiveM caches may keep the small `inject/server.lua` file they downloaded; no manifest loads it any more, so
+it never runs again, and FiveM clears its cache by itself.
 
 ## Escrowed (encrypted) resources
 
@@ -298,7 +360,8 @@ Resource updates that replace a `fxmanifest.lua` remove the line: run `inject.py
 Rerunning the injector also repairs existing standalone wrapper lines: it updates shared-JS declarations and
 moves wrappers before scripts in compact manifests. UTF-8 BOMs and original line endings are preserved.
 As with initial installation, repairs take effect at the resource's next start.
-To remove everything: `python3 inject.py --remove --apply`.
+To remove everything: `python3 inject.py --remove --apply`, then `python3 inject.py --verify` (see
+[Removing it completely](#removing-it-completely-no-residue)).
 
 ## Commands (server console, or in game with the `command.hh` ace)
 
