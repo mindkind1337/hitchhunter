@@ -282,10 +282,13 @@ local function analyse(from, to)
         if a.t0 ~= b.t0 then return a.t0 < b.t0 end
         return a.d > b.d
     end)
+    -- Lua and JS slices come from two clocks lined up to within a few microseconds: a span counts as inside another
+    -- when it is within 2 ms of its edges
+    local TOL = 2 * MS
     for i, s in ipairs(list) do
         local best
         for j, p in ipairs(list) do
-            if j ~= i and p.t0 <= s.t0 and p.t1 >= s.t1 and (p.d > s.d or (p.d == s.d and j < i)) then
+            if j ~= i and p.t0 <= s.t0 + TOL and p.t1 >= s.t1 - TOL and (p.d > s.d or (p.d == s.d and j < i)) then
                 if not best or p.d < best.d then best = p end
             end
         end
@@ -296,7 +299,7 @@ local function analyse(from, to)
         for _, c in ipairs(list) do
             if c.parent == s then kids[#kids + 1] = { math.max(c.t0, s.t0), math.min(c.t1, s.t1) } end
         end
-        s.self = s.d - union(kids)
+        s.self = math.max(0, s.d - union(kids))
     end
     local ivs = {}
     for _, s in ipairs(list) do
@@ -339,6 +342,7 @@ local function verdict(r)
     local top = r.spans[1]
     local others = (r.kinds.network and 1 or 0) + (r.kinds.sync and 1 or 0)
     local h = r.host
+    local f = r.entityFlow
     local machineBusy = h and ((h.machine or 0) >= 90 or (h.load1 and h.load1 > (h.cores or 1) * 1.5))
     if server and r.attributedMs < server * 0.3 and machineBusy then
         return fmt('no wrapped script explains it and the machine is overloaded (%s%d cores, CPU %.0f %%): '
@@ -355,11 +359,30 @@ local function verdict(r)
     if server and r.attributedMs >= server * 0.5 then
         return fmt('scripts ran %d ms of the %d ms freeze (several resources, see the list)', r.attributedMs, server)
     end
+    -- mostly outside scripts: what the resources did just before (state bag writes, entities, big sends are processed by
+    -- the engine after the script returns)
+    if server and r.recent then
+        local parts = {}
+        if f and (f.created >= 100 or f.removed >= 100) then
+            parts[#parts + 1] = fmt('%d entities created and %d removed', f.created, f.removed)
+        end
+        for _, e in ipairs(r.recent.ents or {}) do
+            if #parts >= 3 then break end
+            parts[#parts + 1] = fmt('%s called %s %d times', e.res, e.key, e.value)
+        end
+        local bag = r.recent.bags and r.recent.bags[1]
+        if bag then parts[#parts + 1] = fmt('%s wrote state bag %s %d times', bag.res, bag.key, bag.value) end
+        local snd = r.recent.sent and r.recent.sent[1]
+        if snd then parts[#parts + 1] = fmt('%s sent %s (%d KB)', snd.res, snd.key, snd.value // 1024) end
+        if #parts > 0 then
+            return fmt('%d of the %d ms were outside wrapped scripts (the engine at work). In the %d s before: %s',
+                r.unattributedMs or 0, server, r.recent.seconds or 0, table.concat(parts, '; '))
+        end
+    end
     if server then
         return fmt('only %d ms of the %d ms freeze were in wrapped Lua / JS code: the rest was the engine, C#, '
             .. 'JS async callbacks or a resource without the wrapper', r.attributedMs, server)
     end
-    local f = r.entityFlow
     if r.kinds.sync and f and f.created >= 100 then
         local who = f.owners[1]
         return fmt('the main thread kept running; %d entities were created in the last %d s%s: the sync thread had to '
@@ -378,9 +401,12 @@ local function shortLine(r)
         if #tops >= 3 then break end
         if s.self >= 1 then tops[#tops + 1] = fmt('%s %s %d ms', s.res, s.label, s.self) end
     end
-    return fmt('^3[hitchhunter]^7 #%d %s | %d players | %s%s', r.id, table.concat(k, ' + '), r.players or 0,
+    -- when scripts do not explain it, the verdict says what does (or what happened just before)
+    local mostlyOutside = not r.kinds.server or (r.unattributedMs or 0) >= (r.kinds.server or 0) * 0.5
+    return fmt('^3[hitchhunter]^7 #%d %s | %d players | %s%s%s', r.id, table.concat(k, ' + '), r.players or 0,
         #tops > 0 and table.concat(tops, '; ') or 'no wrapped script in the window',
-        (r.kinds.server and r.unattributedMs and r.unattributedMs > 20) and fmt(' | outside scripts %d ms', r.unattributedMs) or '')
+        (r.kinds.server and r.unattributedMs and r.unattributedMs > 20) and fmt(' | outside scripts %d ms', r.unattributedMs) or '',
+        mostlyOutside and (' | ' .. r.verdict) or '')
 end
 
 local function printFull(r)
@@ -496,7 +522,7 @@ local function finalize(inc)
         local g = gapStats()
         r.frameMs = g and ms(g.median) or 0
         if inc.consoleMs then
-            r.unattributedMs = math.max(0, inc.consoleMs - r.attributedMs)
+            r.unattributedMs = math.min(r.kinds.server, math.max(0, inc.consoleMs - r.attributedMs))
         else
             r.unattributedMs = math.max(0, r.kinds.server - r.attributedMs - r.frameMs)
         end
@@ -505,7 +531,11 @@ local function finalize(inc)
     r.entities = entityCounts()
     r.entityFlow = recentEntities(30)
     r.host = host()
-    if (r.kinds.network or r.kinds.sync) and lastSample then
+    -- what the resources did just before: for network / sync hitches, and for server hitches mostly outside scripts
+    -- (state bag writes, entity creation and big sends are processed by the engine AFTER the script returns)
+    local mostlyOutside = r.kinds.server and r.unattributedMs and r.unattributedMs >= 100
+        and r.unattributedMs >= r.kinds.server * 0.5
+    if (r.kinds.network or r.kinds.sync or mostlyOutside) and lastSample then
         local t = now()
         local cur = lastSample
         if t - lastFreshCollect > 10 * SEC then
@@ -517,7 +547,7 @@ local function finalize(inc)
             r.recent = {
                 seconds = math.floor((cur.at - base.at) / SEC + 0.5),
                 sent = topDiff(cur.data, base.data, 'sent', 3, 5, 2),
-                bags = topDiff(cur.data, base.data, 'bags', 2, 5),
+                bags = topDiff(cur.data, base.data, 'bags', 1, 5),
                 ents = topDiff(cur.data, base.data, 'ents', nil, 5),
                 events = topDiff(cur.data, base.data, 'events', nil, 5),
             }
