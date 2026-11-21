@@ -6,6 +6,12 @@
 -- server thread busy and what it sends, and reports to the hitchhunter resource. It changes nothing in what the
 -- resource's code does: same arguments, same return values, same errors.
 --
+-- No FXServer file is modified (citizen/scripting/lua/scheduler.lua, v8/main.js stay stock): this file replaces
+-- functions in THIS resource's own Lua runtime only, in memory, before the resource's own scripts load. scheduler.lua
+-- runs every event handler and every ref call (exports, callbacks, commands, state bag handlers) through
+-- Citizen.CreateThreadNow(fn, name), looked up in the Citizen table each time: replacing that one function here is what
+-- makes every handler of this resource timed. The full list of replaced functions: README.md, "What is hooked".
+--
 -- What is measured:
 --   * CPU time of every event handler, callback / export call (FiveM "ref calls"), thread and timeout, cut into
 --     slices at each Wait / Await (only the time the code really runs counts, never the time it waits).
@@ -44,6 +50,10 @@ local spanNs = math.max(1, GetConvarInt('hitchhunter_span_ms', 5)) * MS
 local MAX_KEYS = 3000 -- per table; anything past it is counted under "other" (resources that make a new event name per request)
 
 local EV_SPAN, EV_HELLO, EV_REPORT = HH .. ':span', HH .. ':hello', HH .. ':report'
+
+-- every function this file replaced in this resource's runtime, sent to hitchhunter (`hh hooks <resource>`)
+local hooks = {}
+local function hooked(name) hooks[#hooks + 1] = name end
 
 -- [key] = { calls, cpu ns, max slice ns, slices }
 local cpu, cpuKeys = {}, 0
@@ -297,6 +307,11 @@ end
 CreateThread = Citizen.CreateThread
 SetTimeout = Citizen.SetTimeout
 Wait = Citizen.Wait
+hooked('Citizen.CreateThreadNow')
+hooked('Citizen.CreateThread / CreateThread')
+hooked('Citizen.SetTimeout / SetTimeout')
+hooked('Citizen.Wait / Wait')
+hooked('Citizen.Await')
 
 -- names for ref calls
 local exportsMeta = getmetatable(exports)
@@ -306,6 +321,7 @@ if exportsMeta and type(exportsMeta.__call) == 'function' then
 		pcall(nameRef, func, 'export ' .. tostring(name))
 		return rawCall(t, name, func, ...)
 	end
+	hooked('exports(name, fn)')
 end
 
 local rawRegisterCommand = RegisterCommand
@@ -313,6 +329,7 @@ RegisterCommand = function(name, handler, ...)
 	pcall(nameRef, handler, 'command ' .. tostring(name))
 	return rawRegisterCommand(name, handler, ...)
 end
+hooked('RegisterCommand')
 
 if AddStateBagChangeHandler then
 	local rawBagHandler = AddStateBagChangeHandler
@@ -320,6 +337,7 @@ if AddStateBagChangeHandler then
 		pcall(nameRef, handler, 'statebag ' .. tostring(key))
 		return rawBagHandler(key, filter, handler, ...)
 	end
+	hooked('AddStateBagChangeHandler')
 end
 
 -- ------------------------------------------------------------------------------------------------------------------
@@ -357,6 +375,7 @@ if TriggerClientEventInternal then
 		pcall(countSend, eventName, len, playerId, false)
 		return TCEI(eventName, playerId, payload, len)
 	end
+	hooked('TriggerClientEvent')
 end
 
 if TriggerLatentClientEventInternal then
@@ -367,6 +386,7 @@ if TriggerLatentClientEventInternal then
 		pcall(countSend, eventName, len, playerId, true)
 		return TLCEI(eventName, playerId, payload, len, tonumber(bps))
 	end
+	hooked('TriggerLatentClientEvent')
 end
 
 TriggerEvent = function(eventName, ...)
@@ -379,6 +399,7 @@ TriggerEvent = function(eventName, ...)
 	end
 	return callBack(callOut(), rawTrigger(eventName, ...))
 end
+hooked('TriggerEvent')
 
 -- calls into another resource's function (exports, callbacks, ESX objects...) all go through the funcref
 -- metatable's __call: one shared metatable per runtime, reached through a funcref made here
@@ -390,6 +411,7 @@ do
 		mt.__call = function(ref, ...)
 			return callBack(callOut(), rawCall(ref, ...))
 		end
+		hooked('funcref __call (calls into other resources)')
 	end
 end
 
@@ -418,6 +440,7 @@ if SetStateBagValue then
 		pcall(countBag, bagName, key, size)
 		return rawSet(bagName, key, data, size, replicated, ...)
 	end
+	hooked('SetStateBagValue')
 end
 
 -- entity natives: load on the sync thread (creation, deletion, routing buckets)
@@ -431,6 +454,7 @@ for _, name in ipairs({ 'CreateVehicle', 'CreateVehicleServerSetter', 'CreatePed
 			ents[name] = ents[name] + 1
 			return raw(...)
 		end
+		hooked(name)
 	end
 end
 
@@ -463,11 +487,11 @@ local function timed(what, raw, detailArg)
 	end
 end
 
-if LoadResourceFile then LoadResourceFile = timed('LoadResourceFile', LoadResourceFile, 2) end
-if SaveResourceFile then SaveResourceFile = timed('SaveResourceFile', SaveResourceFile, 2) end
-if io and io.open then io.open = timed('io.open', io.open, 1) end
-if json and json.encode then json.encode = timed('json.encode', json.encode) end
-if json and json.decode then json.decode = timed('json.decode', json.decode) end
+if LoadResourceFile then LoadResourceFile = timed('LoadResourceFile', LoadResourceFile, 2) hooked('LoadResourceFile') end
+if SaveResourceFile then SaveResourceFile = timed('SaveResourceFile', SaveResourceFile, 2) hooked('SaveResourceFile') end
+if io and io.open then io.open = timed('io.open', io.open, 1) hooked('io.open') end
+if json and json.encode then json.encode = timed('json.encode', json.encode) hooked('json.encode') end
+if json and json.decode then json.decode = timed('json.decode', json.decode) hooked('json.decode') end
 
 -- ------------------------------------------------------------------------------------------------------------------
 -- reports to hitchhunter
@@ -522,7 +546,7 @@ AddEventHandler(HH .. ':collect', onCollect)            -- everybody at once (co
 AddEventHandler(HH .. ':collect:' .. RES, onCollect)    -- one by one (periodic samples, spread over frames)
 
 AddEventHandler(HH .. ':announce', function()
-	rawTrigger(EV_HELLO, RES, 'lua', VERSION, now())
+	rawTrigger(EV_HELLO, RES, 'lua', VERSION, now(), hooks)
 end)
 
-rawTrigger(EV_HELLO, RES, 'lua', VERSION, now())
+rawTrigger(EV_HELLO, RES, 'lua', VERSION, now(), hooks)

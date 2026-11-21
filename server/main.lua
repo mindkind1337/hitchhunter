@@ -20,14 +20,14 @@ local cfg = Config
 -- wrapped runtimes
 local runtimes = {} -- [res] = { lua = { v, seen }, js = { v, seen, offset } }
 
-AddEventHandler(HH .. ':hello', function(res, kind, version, theirNow)
+AddEventHandler(HH .. ':hello', function(res, kind, version, theirNow, hooks)
     if type(res) ~= 'string' or (kind ~= 'lua' and kind ~= 'js') then return end
     local r = runtimes[res]
     if not r then
         r = {}
         runtimes[res] = r
     end
-    local e = { v = version, seen = os.time() }
+    local e = { v = version, seen = os.time(), hooks = type(hooks) == 'table' and hooks or {} }
     -- JS reads another clock (process.hrtime): the hello is delivered while the sender waits, so the difference
     -- between both clocks right now is the offset to put its times on ours
     if kind == 'js' and type(theirNow) == 'number' then e.offset = now() - theirNow end
@@ -717,6 +717,47 @@ local function cmdCoverage(src)
     out(src, '  (tools/inject.py adds the line; a resource picks it up at its next start)')
 end
 
+-- what the wrapper replaced in each resource (nothing in FXServer's own files)
+local function cmdHooks(src, args)
+    local res = args[2]
+    if res then
+        local r = runtimes[res]
+        if not r then return out(src, fmt('^3[hitchhunter]^7 %s has no wrapper (or has not started since hitchhunter did)', res)) end
+        for _, kind in ipairs({ 'lua', 'js' }) do
+            local e = r[kind]
+            if e then
+                out(src, fmt('^3[hitchhunter]^7 %s, %s runtime (wrapper v%s, said hello %s ago), %d functions replaced in memory:',
+                    res, kind, tostring(e.v), since(os.time() - e.seen), #e.hooks))
+                for _, h in ipairs(e.hooks) do out(src, '   ' .. h) end
+            end
+        end
+        return
+    end
+    local count, total = {}, { lua = 0, js = 0 }
+    for _, r in pairs(runtimes) do
+        for _, kind in ipairs({ 'lua', 'js' }) do
+            local e = r[kind]
+            if e then
+                total[kind] = total[kind] + 1
+                for _, h in ipairs(e.hooks) do
+                    local k = kind .. '|' .. h
+                    count[k] = (count[k] or 0) + 1
+                end
+            end
+        end
+    end
+    out(src, '^3[hitchhunter]^7 no FXServer file is modified (scheduler.lua, main.js stay stock). Functions replaced '
+        .. 'in memory inside each wrapped resource, and in how many:')
+    local list = {}
+    for k, n in pairs(count) do list[#list + 1] = { k, n } end
+    table.sort(list, function(a, b) return a[1] < b[1] end)
+    for _, it in ipairs(list) do
+        local kind, h = it[1]:match('^(%a+)|(.*)$')
+        out(src, fmt('  %-3s %4d / %-4d %s', kind, it[2], total[kind], h))
+    end
+    out(src, '  (hh hooks <resource> for one resource)')
+end
+
 local function cmdLast(src, args)
     local n = tonumber(args[2]) or 10
     if #reports == 0 then return out(src, '^3[hitchhunter]^7 no hitch since start') end
@@ -761,6 +802,7 @@ local HELP = {
     'hh sync [n]          state bag writes and entity natives',
     'hh io [n]            file / json calls that block the thread',
     'hh coverage          which running resources are not wrapped',
+    'hh hooks [resource]  what the wrapper replaced in memory (no FXServer file is modified)',
     'hh reset             start all counters again',
     'hh test <ms>         busy-wait <ms> in an event handler of this resource (to see a report)',
 }
@@ -776,6 +818,7 @@ RegisterCommand('hh', function(src, args)
     elseif sub == 'sync' then cmdSync(src, args)
     elseif sub == 'io' then cmdIo(src, args)
     elseif sub == 'coverage' then cmdCoverage(src)
+    elseif sub == 'hooks' then cmdHooks(src, args)
     elseif sub == 'reset' then
         collectAll(0, true)
         out(src, '^3[hitchhunter]^7 counters reset in every wrapped resource')
@@ -796,5 +839,9 @@ end)
 
 -- ask the resources that started before us to say hello
 TriggerEvent(HH .. ':announce')
+
+print(('^3[hitchhunter]^7 started. No FXServer file is modified: each resource with the manifest line '
+    .. '(tools/inject.py) loads @%s/inject/server.lua / .js first and times its own handlers in memory. '
+    .. '`hh` for the commands, `hh hooks` for what is replaced.'):format(HH))
 
 exports('reports', function() return reports end)

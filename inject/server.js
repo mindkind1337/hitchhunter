@@ -5,6 +5,8 @@
 //
 // Covered: event handlers (on / onNet / addEventListener / AddEventHandler) and exports, timed while they run;
 // emitNet / TriggerClientEvent / TriggerLatentClientEvent and emit (counts).
+// No FXServer file is modified (citizen/scripting/v8/main.js and timer.js stay stock): only this resource's own JS
+// globals are replaced, in memory, before its own scripts load.
 // NOT covered: setTick / setTimeout / setInterval / setImmediate (FiveM defines them read-only, they cannot be
 // wrapped) and the code that runs after an `await` (promise continuations). A JS resource busy there shows up
 // in hitch reports as time outside wrapped scripts.
@@ -33,6 +35,9 @@
     const EV_SPAN = HH + ':span';
     const EV_HELLO = HH + ':hello';
     const EV_REPORT = HH + ':report';
+
+    // every function this file replaced in this resource's JS runtime, sent to hitchhunter (`hh hooks <resource>`)
+    const hooks = [];
 
     const rawEmit = g.emit;
     const rawAdd = g.addEventListener;
@@ -139,12 +144,14 @@
         g.addEventListener = add; // onNet / addNetEventListener call global.addEventListener: covered too
         g.on = add;
         g.AddEventHandler = add;
+        hooks.push('addEventListener / on / AddEventHandler (onNet goes through it)');
         const rawRemove = g.removeEventListener;
         if (typeof rawRemove === 'function') {
             g.removeEventListener = function (name, cb, ...rest) {
                 const m = typeof cb === 'function' ? wrappedOf.get(cb) : null;
                 return rawRemove(name, (m && m.get(name)) || cb, ...rest);
             };
+            hooks.push('removeEventListener');
         }
     }
 
@@ -178,6 +185,7 @@
                 return Reflect.apply(target, self, args);
             },
         });
+        hooks.push('exports (registering: timed; calling another resource: own time paused)');
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -205,6 +213,7 @@
         };
         g.emitNet = w;
         g.TriggerClientEvent = w;
+        hooks.push('emitNet / TriggerClientEvent');
     }
     const rawLatent = g.TriggerLatentClientEvent;
     if (typeof rawLatent === 'function') {
@@ -212,6 +221,7 @@
             try { countSend(name, target, true); } catch (e) { /* never break a send */ }
             return rawLatent(name, target, bps, ...args);
         };
+        hooks.push('TriggerLatentClientEvent');
     }
     if (typeof rawEmit === 'function') {
         const w = function (name, ...args) {
@@ -223,6 +233,7 @@
         };
         g.emit = w;
         g.TriggerEvent = w;
+        hooks.push('emit / TriggerEvent');
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -251,6 +262,6 @@
     }
     rawAdd(HH + ':collect', onCollect);
     rawAdd(HH + ':collect:' + RES, onCollect);
-    rawAdd(HH + ':announce', () => rawEmit(EV_HELLO, RES, 'js', VERSION, now()));
-    rawEmit(EV_HELLO, RES, 'js', VERSION, now());
+    rawAdd(HH + ':announce', () => rawEmit(EV_HELLO, RES, 'js', VERSION, now(), hooks));
+    rawEmit(EV_HELLO, RES, 'js', VERSION, now(), hooks);
 })();

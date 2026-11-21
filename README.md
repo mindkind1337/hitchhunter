@@ -38,6 +38,114 @@ what was sent or created in the seconds before.
   wrapped script and the machine is overloaded, or every thread stalls at once, the cause is the machine (or the
   engine), not a resource, and the report says so.
 
+## How hitches are detected (no engine patch)
+
+FXServer runs three threads that can hitch. hitchhunter sees them without touching the engine:
+
+* **Server (main) thread, its own timer.** `server/main.lua` runs a Lua thread that does `Wait(0)` in a loop: it
+  is resumed once per server frame (FXServer runs at 20 Hz, so every ~50 ms) and notes the time (`os.nanotime`).
+  Every resource script runs on this same thread, so while something blocks it, that loop cannot run either: a gap
+  of `Config.frameHitchMs` (100 ms) or more between two frames IS a main thread freeze, measured to the
+  microsecond, with its exact start and end. This also catches the 100-150 ms freezes FXServer never prints.
+* **All three threads, FXServer's own warnings.** The engine measures its threads itself and prints
+  `server|network|sync thread hitch warning: timer interval of N milliseconds` (channel `citizen-server-impl`).
+  `RegisterConsoleListener` (a server native) gives every console line to a script: hitchhunter keeps those three,
+  only from that channel (a resource printing the same text is ignored). Network and sync threads cannot be timed
+  from a script at all, so for them this warning is the only source; hitchhunter adds what it knows around it.
+  On a build without `RegisterConsoleListener`, only the main thread is seen.
+* **Matching.** A frame gap gives the window; a console warning arrives right after the freeze and only says how
+  long, so it joins the frame hitch of the closest length (or the run of back-to-back frame hitches it covers:
+  FXServer's frames are not in phase with hitchhunter's). Network / sync warnings join a hitch seen within 2 s, or
+  make their own report.
+* **Attribution.** Every wrapped resource sends the time span of each block of 5 ms or more (start, length, what it
+  was). The report takes the spans inside the window, finds which span contains which (a handler that called an
+  export of another resource contains that export's span) to get each one's own time, and drops a span during which
+  hitchhunter's frame thread ran (it could not have been blocking). What is left of the window is "outside wrapped
+  scripts": the engine, C#, JS timers, a resource without the wrapper.
+* **Network / sync context.** Every 30 s (a few resources per frame) and right at a network / sync hitch,
+  hitchhunter asks every wrapped resource for its counters; the difference is what was sent (bytes x players),
+  written to state bags and created as entities just before the hitch. Plus player and entity counts and the
+  machine's load.
+
+## What is hooked, and where
+
+**No FXServer file is modified.** `citizen/scripting/lua/scheduler.lua`, `citizen/scripting/v8/main.js` and
+`timer.js` stay stock, so artifact updates do not remove or break anything. Everything happens inside each resource's
+own script runtime, in memory:
+
+1. `tools/inject.py` writes one line in the resource's `fxmanifest.lua`, before its first script declaration:
+   * `shared_script '@hitchhunter/inject/server.lua'` when the resource has client Lua (a shared script loads before
+     every server script, so the wrapper is in place before `@ox_lib/init.lua`, `@es_extended/imports.lua` and the
+     like, which keep local copies of functions). The client copy stops at its first line (`IsDuplicityVersion()`).
+   * `server_script '@hitchhunter/inject/server.lua'` when the resource has server Lua only (a shared script would
+     make every player's game create a Lua runtime for nothing).
+   * `server_script '@hitchhunter/inject/server.js'` when the resource has server JS.
+   * Lines another tool marks "keep first" (an anticheat wrapper, for example) stay before it.
+2. When the resource starts, that file replaces some functions of that resource's runtime (the table below), then
+   the resource's own scripts load and use them without knowing.
+3. A resource started without the line (`hh coverage` lists them) is not measured; its time shows in reports as
+   "outside wrapped scripts".
+
+Why no `scheduler.lua` patch is needed: `scheduler.lua` runs **every event handler** of a resource through
+`Citizen.CreateThreadNow(fn, 'event <name> [<file>[<lines>]]')` and **every ref call** (exports, callbacks,
+commands, state bag handlers: anything another resource or the engine calls through a function reference) through
+`Citizen.CreateThreadNow(fn, 'ref call [<file>[<lines>]]')`, and it looks `Citizen.CreateThreadNow` up in the
+runtime's `Citizen` table each time. Replacing that one function inside the runtime times all of them, with their
+names, exactly where a `scheduler.lua` patch would.
+
+`hh hooks` lists what was replaced and in how many resources; `hh hooks <resource>` for one resource.
+
+### Lua (`inject/server.lua`, in each resource's server Lua runtime)
+
+| replaced | what for | what the resource sees |
+|---|---|---|
+| `Citizen.CreateThreadNow` | times every event handler and ref call (export, callback, command, state bag handler), named from scheduler.lua's thread name | same function, same return value (whether the thread waited) |
+| `Citizen.CreateThread`, `CreateThread` | times each thread, named `thread <file>:<line>` | same |
+| `Citizen.SetTimeout`, `SetTimeout` | times each timeout, `timeout <file>:<line>` | same, same return value |
+| `Citizen.Wait`, `Wait` | ends the running slice before waiting, starts a new one after (waiting never counts) | same |
+| `Citizen.Await` | same as Wait; a rejected promise is thrown again with `error(v, 2)`, which gives the exact message stock `Await` gives | same values, same errors |
+| `exports` metatable `__call` (`exports('name', fn)`) | remembers that the function is export `name`, so its ref calls are labelled `export name` | same |
+| `RegisterCommand` | remembers the command name for the label | same |
+| `AddStateBagChangeHandler` | remembers the key for the label | same |
+| `TriggerClientEvent`, `TriggerLatentClientEvent` | counts sends and bytes (x players for `-1`); the body is scheduler.lua's own (`msgpack.pack_args` once, then `TriggerClientEventInternal`) so the payload is not packed twice | same |
+| `TriggerEvent` | counts local events; pauses the resource's own time while other handlers run | same |
+| the funcref metatable `__call` (one per runtime, shared by every function reference received from elsewhere: other resources' exports, callbacks, ESX player objects...) | pauses the resource's own time while the other resource's code runs | same |
+| `SetStateBagValue` (the native `Entity(x).state`, `Player(x).state` and `GlobalState` call) | counts writes and bytes per bag kind and key | same |
+| `CreateVehicle`, `CreateVehicleServerSetter`, `CreatePed`, `CreatePedInsideVehicle`, `CreateObject`, `CreateObjectNoOffset`, `DeleteEntity`, `SetEntityRoutingBucket`, `SetPlayerRoutingBucket`, `SetEntityDistanceCullingRadius`, `SetEntityOrphanMode` | counts calls | same (tail call) |
+| `LoadResourceFile`, `SaveResourceFile`, `io.open`, `json.encode`, `json.decode` | times each call; one of 5 ms or more becomes its own line in the report (`io SaveResourceFile data.json`) | same |
+
+Not touched: `AddEventHandler`, `RegisterNetEvent`, `RemoveEventHandler`, `source`, msgpack, the event dispatch
+itself, anything on the client.
+
+### JS (`inject/server.js`, in each resource's server JS runtime)
+
+| replaced | what for |
+|---|---|
+| `addEventListener`, `on`, `AddEventHandler` (`onNet` / `addNetEventListener` call `addEventListener`) | times every handler, `event <name>` |
+| `removeEventListener` | maps the original callback to the timed one, so removing still works |
+| `exports` (a Proxy around the stock one) | registering: times the export function; `exports.res.fn()`: pauses own time while the other resource runs |
+| `emitNet`, `TriggerClientEvent`, `TriggerLatentClientEvent` | counts sends (no byte size: the JS runtime packs internally) |
+| `emit`, `TriggerEvent` | counts local events, pauses own time while other handlers run |
+
+Cannot be replaced: `setTick`, `setTimeout`, `setInterval`, `setImmediate` (FiveM's `timer.js` defines them
+read-only). Code after an `await` runs outside any handler.
+
+### What changes, visibly
+
+* A `SCRIPT ERROR` traceback has one more line, from `@hitchhunter/inject/server.lua`, between the resource's code and
+  scheduler.lua; a JS stack has frames from `inject/server.js`. The message itself is unchanged.
+* `debug.getinfo(Citizen.CreateThread)` and the like point at hitchhunter's file.
+* Each runtime keeps its counters (at most 3000 entries per table) and sends slices of 5 ms or more to the collector
+  as local events (`hitchhunter:span`, at most 40 per second). Nothing goes over the network.
+* Local events used: `hitchhunter:span`, `:hello`, `:report`, `:collect`, `:collect:<resource>`, `:announce`.
+
+### Turning it off
+
+* `set hitchhunter_inject 0` in server.cfg: the wrapper does nothing in resources that start after (kill switch).
+* `stop hitchhunter`: wrapped resources keep running, they just stop sending (they check that hitchhunter is started).
+  The manifest line has no `dependency`, so stopping hitchhunter never stops another resource.
+* `python3 tools/inject.py --remove --apply` takes every line out; each resource is back to stock at its next start.
+
 ## Install
 
 1. Put the `hitchhunter` folder in your `resources` (any `[category]`).
