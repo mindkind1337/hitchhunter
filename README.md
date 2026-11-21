@@ -272,6 +272,7 @@ To remove everything: `python3 inject.py --remove --apply`.
 | `hh coverage` | started resources with server scripts that are not wrapped |
 | `hh hooks [resource]` | what the wrapper replaced in memory, in how many resources |
 | `hh starts [n]` | the slowest resource starts (loading a resource's scripts blocks the server thread) |
+| `hh how` | how each problem is found and what its report looks like (the section below, in the console) |
 | `hh reset` | start every counter again |
 | `hh test <ms>` | freeze the server thread for `<ms>` to see a report come out |
 
@@ -365,6 +366,27 @@ export return values and errors, `Await` resolve / reject, commands, `RemoveEven
   split own time across resources).
 * Lua code that yields with `coroutine.yield` itself (not `Wait` / `Await`) could make a slice look longer than it
   was; the collector drops slices during which the server thread was demonstrably free.
+
+## For AI agents and automation
+
+**[AGENTS.md](AGENTS.md)** is the full guide for an agent: rules not to break, file map, install / check / remove,
+every output with its exact JSON shape, the meaning of each label, a step-by-step diagnosis, how to change the code
+safely and how to test it. `CLAUDE.md` imports it for Claude Code.
+
+The short version, for an agent without console access:
+
+* **Is it working?** Read `logs/status.json` (rewritten every minute): `wrapped` lists every resource with the
+  wrapper (Lua / JS, how many functions replaced), `counts` the hitches seen, `consoleListener: false` means network
+  / sync hitches cannot be seen on that build.
+* **What happened?** Read `logs/hitches-YYYY-MM-DD.jsonl`, one report per line. Start with `verdict`, then `spans`
+  (sorted by `self` = own ms; `ms` = total including what it called; `parent` = who called it), then
+  `unattributedMs` with `recent` / `entityFlow` / `host` when scripts do not explain it.
+* **Errors?** `logs/script-errors-YYYY-MM-DD.log`: every `SCRIPT ERROR` with its stack.
+* **From another resource**: `exports.hitchhunter:reports()`.
+* **With console access**: `hh how` prints how each problem is found; `hh top` / `hh io` / `hh net` / `hh sync` /
+  `hh starts` for cost over time.
+* **Never**: patch FXServer's files, run the test resources on a server with players, inject into a folder another
+  server shares, change `inject/*` without the A/B test.
 
 ## License
 

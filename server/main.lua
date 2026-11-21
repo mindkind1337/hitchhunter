@@ -1016,6 +1016,32 @@ local function cmdStatus(src)
     if not RegisterConsoleListener then out(src, '  (no RegisterConsoleListener on this build: network / sync not seen)') end
 end
 
+-- `hh how`: how the resource finds each problem (the same as README.md, "What it finds, and how")
+local HOW = {
+    '^3[hitchhunter]^7 how a hitch is found:',
+    ' 1. While code runs, the wrapper inside each resource times every handler, thread, callback, export, timer.',
+    '    A block of 5 ms or more is sent here at once (start + length); the rest adds up in counters.',
+    ' 2. The freeze is noticed: this resource\'s frame thread sees a gap of ' .. cfg.frameHitchMs .. ' ms or more between two',
+    '    server frames (it cannot run while something blocks the thread), and/or FXServer prints its hitch warning',
+    '    for the server, network or sync thread (read with RegisterConsoleListener).',
+    ' 3. ' .. cfg.reportDelayMs .. ' ms later the report is built: the blocks inside the freeze, which one called which (own time vs',
+    '    total), the part no script explains, players, entities, machine load, and what resources did just before.',
+    ' 4. Written to the console, logs/hitches-*.jsonl, `hh last` / `hh show`, Discord if set.',
+    'what each problem looks like:',
+    '  handler doing too much ....... event <name> <file>:<line> N ms',
+    '  thread with a heavy loop ..... thread <file>:<line> N ms',
+    '  slow export from elsewhere ... export <name> N ms, the caller\'s own time apart',
+    '  file / json ................... io SaveResourceFile <file>, io json.decode N ms (hh io)',
+    '  resource restarted live ....... resource start (loading its scripts) N ms (hh starts)',
+    '  JS ............................ event <name>, js timers, js setTick + code after await',
+    '  many small calls .............. hh top: ms per minute per handler',
+    '  engine after a script ......... outside wrapped scripts + what was done just before (entities, state bags)',
+    '  network thread ................ FXServer warning + what was sent just before (hh net)',
+    '  sync thread ................... FXServer warning + entities created/removed and by whom (hh sync)',
+    '  whole process stalled ......... server + network + sync together, no script: the machine, not a resource',
+    '  C# / no wrapper ............... outside wrapped scripts (hh coverage)',
+}
+
 local HELP = {
     'hh status            what is watched, how many hitches',
     'hh last [n]          the last hitches, one line each',
@@ -1030,6 +1056,7 @@ local HELP = {
     'hh starts [n]        the slowest resource starts (loading scripts blocks the server thread)',
     'hh reset             start all counters again',
     'hh test <ms>         busy-wait <ms> in an event handler of this resource (to see a report)',
+    'hh how               how each problem is found, and what its report looks like',
 }
 
 RegisterCommand('hh', function(src, args)
@@ -1045,6 +1072,7 @@ RegisterCommand('hh', function(src, args)
     elseif sub == 'coverage' then cmdCoverage(src)
     elseif sub == 'hooks' then cmdHooks(src, args)
     elseif sub == 'starts' then cmdStarts(src, args)
+    elseif sub == 'how' then for _, l in ipairs(HOW) do out(src, l) end
     elseif sub == 'reset' then
         collectAll(0, true)
         out(src, '^3[hitchhunter]^7 counters reset in every wrapped resource')
