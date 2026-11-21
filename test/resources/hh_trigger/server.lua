@@ -12,6 +12,7 @@
 --   hhx send <n> <bytes>    <n> TriggerClientEvent(-1) of <bytes> each
 --   hhx aliases             threads / timeouts started with and without `Citizen.`
 --   hhx natives <n>         entity natives by name and by hash (Lua, JS), state bags from JS: all counted
+--   hhx emit <event> <ms>   TriggerEvent(<event>, <ms>) (a handler of another resource)
 --   hhx all                 everything above, 6 s apart
 local RES = GetCurrentResourceName()
 
@@ -84,6 +85,8 @@ tests.natives = function(n)
         end
     end)
 end
+-- any local event, e.g. a handler of another test resource: hhx emit hh_sharedjs:busy 200
+tests.emit = function(name, ms) TriggerEvent(name, tonumber(ms) or 200) end
 tests.all = function()
     CreateThread(function()
         for _, step in ipairs({ { 'event', 300 }, { 'thread', 250 }, { 'export', 200 }, { 'nested', 200 }, { 'io', 60 },
@@ -99,7 +102,7 @@ end
 
 RegisterCommand('hhx', function(src, args)
     local fn = tests[args[1] or '']
-    if not fn then return print('[hh_trigger] hhx event|thread|export|nested|io|json|js|entities|bags|send|aliases|natives|all [args]') end
+    if not fn then return print('[hh_trigger] hhx event|thread|export|nested|io|json|js|entities|bags|send|aliases|natives|emit|all [args]') end
     print('[hh_trigger] ' .. table.concat(args, ' '))
     fn(args[2], args[3])
 end, true)
