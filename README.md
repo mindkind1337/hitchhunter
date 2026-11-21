@@ -38,6 +38,41 @@ what was sent or created in the seconds before.
   wrapped script and the machine is overloaded, or every thread stalls at once, the cause is the machine (or the
   engine), not a resource, and the report says so.
 
+## What it finds, and how
+
+What happens when the server hitches, step by step:
+
+1. **While the code runs** (inside each wrapped resource): every handler, thread, callback, export, timer is timed
+   as it runs. A block that held the server thread 5 ms or more is sent to the collector at once with its exact
+   start and length ("span"). Everything else adds up in counters (time per handler, sends, state bags, entities,
+   file / json calls) kept inside the resource.
+2. **The freeze is noticed**: the collector's frame thread sees a gap of 100 ms or more between two server frames
+   (it could not run while something blocked the thread), and / or FXServer prints its `hitch warning` for the
+   server, network or sync thread.
+3. **400 ms later the report is built**: the spans inside the freeze, who contains whom (a handler that called
+   another resource's export contains it: own time vs total), what is left unexplained, and around it: players,
+   entities, the machine's load, and when the scripts do not explain it, what the resources did in the seconds
+   before (entities created / removed and by whom, entity natives, state bag writes, client events sent).
+4. **It is written**: one line in the console (`Config.console`), the whole report in `logs/hitches-*.jsonl`,
+   `hh last` / `hh show`, Discord if set.
+
+What each kind of problem looks like (real reports from the test resources and a copy of a 183-resource server):
+
+| the problem | how hitchhunter sees it | what the report says |
+|---|---|---|
+| an event handler doing too much | the handler runs through `Citizen.CreateThreadNow`, timed from start to end | `hh_trigger event hh_trigger:busy server.lua:21 300 ms` |
+| a thread with a heavy loop | the thread's slices between two `Wait` | `apex_clothing thread build/server/templates.lua:497 869 ms` |
+| a slow export called from another resource | the export is timed in its own resource; the caller's own time is paused meanwhile | `hh_trigger export busy 200 ms; hh_trigger event hh_trigger:nested 21 ms` (own time of each) |
+| a big file write / read, a huge json | `SaveResourceFile`, `LoadResourceFile`, `io.open`, `json.*` timed one by one | `io json.decode 351 ms`, `io SaveResourceFile big.tmp 21 ms`; `hh io`: "18818 LoadResourceFile, 877 ms" |
+| restarting a resource on a live server | `onResourceStarting` to `onResourceStart` | `apex_clothing resource start (loading its scripts) 47 ms`, then its thread; `hh starts` |
+| a JS handler, timer, `setTick`, code after `await` | handlers by name; the tick in phases (the resource's first timer and first ticker mark them) | `event hh_trigger:js 200 ms`, `js timers (setTimeout / setInterval) 220 ms`, `js setTick + code after await 160 ms` |
+| many small calls adding up (no single big freeze) | the counters: own time per handler, per minute | `hh top`: "ms/min, calls, average, longest" per handler and per resource |
+| the engine working after a script (entities, state bags) | the freeze is outside every span; the counters of the seconds before are compared | "296 ms outside wrapped scripts (the engine at work). In the 23 s before: 2000 entities created and 2000 removed; hh_trigger called CreateObjectNoOffset 2000 times" |
+| a network thread hitch | FXServer's warning; the sends of the seconds before (bytes x players) | `network 617 ms` + "sent ... KB", `hh net` |
+| a sync thread hitch | FXServer's warning; every entity created / removed (players' games and scripts) and by whom, entity natives, state bags | "412 entities created in the last 30 s (most by Name [12]: 380)", `hh sync` |
+| the whole process stalled (machine overloaded, VM pause, disk / swap) | the three threads stall at once while no wrapped script runs; the machine's CPU / load | `server 558 ms + network 516 ms + sync 512 ms`, "the whole process was held up ... not one resource script" |
+| C#, FiveM's own resources, a resource without the wrapper | the freeze is outside every span | "outside wrapped scripts"; `hh coverage` lists the unwrapped ones |
+
 ## Coverage: what is seen, what is not
 
 **Seen and named** (resource + handler / thread / export / file and line):
